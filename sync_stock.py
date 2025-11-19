@@ -77,5 +77,5 @@ def main(dry_run: bool = True):
 
 if __name__ == "__main__":
     # ПЕРВЫЙ ЗАПУСК: оставляем dry_run=True, чтобы ничего не менять на Ozon
-    main(dry_run=True)
+    main(dry_run=DRY_RUN)
 
