@@ -6,13 +6,13 @@ from ozon_client import update_stocks
 
 load_dotenv()
 
-WAREHOUSE_ID = int(os.getenv("OZON_WAREHOUSE_ID", "0"))
+WAREHOUSE_ID_RAW = os.getenv("OZON_WAREHOUSE_ID", "0")
 DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
 
-if not WAREHOUSE_ID:
-    raise RuntimeError("Не задан OZON_WAREHOUSE_ID в .env")
-
-WAREHOUSE_ID = int(WAREHOUSE_ID)
+try:
+    WAREHOUSE_ID = int(WAREHOUSE_ID_RAW)
+except ValueError:
+    raise RuntimeError("OZON_WAREHOUSE_ID в .env должен быть числом")
 
 
 def build_ozon_stocks_from_ms(limit: int = 100) -> list:
@@ -34,7 +34,7 @@ def build_ozon_stocks_from_ms(limit: int = 100) -> list:
 
         try:
             stock_int = int(stock_value) if stock_value is not None else 0
-        except ValueError:
+        except (TypeError, ValueError):
             stock_int = 0
 
         if stock_int < 0:
@@ -49,11 +49,16 @@ def build_ozon_stocks_from_ms(limit: int = 100) -> list:
     return stocks
 
 
-def main(dry_run: bool = True):
+def main(dry_run: bool | None = None):
     """
-    dry_run=True  -> только печатаем, что отправили бы в Ozon.
-    dry_run=False -> реально отправляем запрос в Ozon.
+    dry_run:
+      - True  -> только печатаем, что отправили бы в Ozon.
+      - False -> реально отправляем запрос в Ozon.
+      - None  -> берём значение из переменной окружения DRY_RUN.
     """
+    if dry_run is None:
+        dry_run = DRY_RUN
+
     stocks = build_ozon_stocks_from_ms(limit=50)  # пока ограничимся 50 строками
 
     if not stocks:
@@ -61,21 +66,21 @@ def main(dry_run: bool = True):
         return
 
     print(f"Сформировано {len(stocks)} позиций для обновления остатков в Ozon.")
-    print("Пример 5 позиций:")
+    print("Пример первых 5 позиций:")
     for item in stocks[:5]:
         print(item)
 
     if dry_run:
-        print("\nРежим dry_run=TRUE: данные в Ozon НЕ отправляются.")
+        print("\nРежим DRY_RUN=TRUE: данные в Ozon НЕ отправляются.")
         return
 
     # Если dry_run=False -> реально отправляем
+    print("\nОтправка остатков в Ozon...")
     resp = update_stocks(stocks)
-    print("\nОтвет Ozon на обновление остатков:")
+    print("Ответ Ozon:")
     print(resp)
 
 
 if __name__ == "__main__":
-    # ПЕРВЫЙ ЗАПУСК: оставляем dry_run=True, чтобы ничего не менять на Ozon
-    main(dry_run=DRY_RUN)
-
+    # Жёстко завязано на DRY_RUN из .env, чтобы случайно не включить боевой режим
+    main(dry_run=None)
