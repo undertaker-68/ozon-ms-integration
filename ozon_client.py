@@ -38,18 +38,22 @@ def update_stocks(stocks: list) -> dict:
 def get_fbs_postings(limit: int = 10) -> dict:
     """
     Получить список FBS-отправлений.
-    Фильтр здесь минимальный, чтобы не усложнять.
-    При необходимости параметры можно будет донастроить
-    по сообщениям об ошибках от API Ozon.
+    Сейчас работаем в режиме отладки: печатаем полный ответ Ozon,
+    даже если он вернул 400/422 и т.п., чтобы понять, чего ему не хватает.
     """
     url = f"{BASE_URL}/v3/posting/fbs/list"
 
+    # Минимальный фильтр. Ozon, скорее всего, попросит since/to или другие поля.
     body = {
         "limit": limit,
         "offset": 0,
         "dir": "ASC",
-        # минимальный фильтр; Ozon может потребовать уточнить since/to
-        "filter": {},
+        "filter": {
+            # начальная дата; при необходимости потом поменяем
+            "since": "2025-01-01T00:00:00Z"
+            # "to": "2025-12-31T23:59:59Z",  # можно будет добавить позже
+            # статусы пока не указываем, чтобы не ловить конфликтов
+        },
         "with": {
             "analytics_data": True,
             "financial_data": True,
@@ -57,7 +61,17 @@ def get_fbs_postings(limit: int = 10) -> dict:
     }
 
     r = requests.post(url, json=body, headers=HEADERS)
+
+    # ВАЖНО: печатаем тело ответа всегда, даже если статус не 200
+    print("=== Ответ Ozon /v3/posting/fbs/list ===")
+    print("HTTP status:", r.status_code)
+    print("Response text:")
+    print(r.text)
+    print("=== /Ответ Ozon ===\n")
+
+    # Потом всё равно бросаем исключение, если статус не ок — чтобы sync_orders знал, что что-то не так
     r.raise_for_status()
+
     return r.json()
 
 
