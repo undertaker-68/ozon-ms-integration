@@ -1,6 +1,7 @@
 import os
 import requests
 from dotenv import load_dotenv
+from datetime import datetime, timedelta, timezone
 
 load_dotenv()
 
@@ -37,11 +38,13 @@ def update_stocks(stocks: list) -> dict:
 
 from datetime import datetime, timedelta, timezone
 
+from datetime import datetime, timedelta, timezone
+
 def get_fbs_postings(limit: int = 10) -> dict:
     """
     Получить список FBS-отправлений (режим отладки).
-    Теперь указываем обязательные поля processed_at_from / processed_at_to.
-    Берём заказы за последние 7 дней.
+    Теперь используем вложенный объект processed_at: {from, to}.
+    Берём отправления за последние 7 дней.
     """
     url = f"{BASE_URL}/v3/posting/fbs/list"
 
@@ -56,10 +59,12 @@ def get_fbs_postings(limit: int = 10) -> dict:
         "offset": 0,
         "dir": "ASC",
         "filter": {
-            "processed_at_from": processed_at_from,
-            "processed_at_to": processed_at_to,
-            # статус пока не указываем, чтобы лишний раз не ловить ошибки,
-            # потом можно сузить до нужных (например, delivered / cancelled и т.п.)
+            "processed_at": {
+                "from": processed_at_from,
+                "to": processed_at_to,
+            },
+            # статус пока не указываем, чтобы лишний раз не ловить ошибки;
+            # потом можно будет сузить до нужных статусов
         },
         "with": {
             "analytics_data": True,
@@ -77,7 +82,6 @@ def get_fbs_postings(limit: int = 10) -> dict:
 
     r.raise_for_status()
     return r.json()
-
 
 
 if __name__ == "__main__":
