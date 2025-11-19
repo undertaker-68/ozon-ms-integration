@@ -35,21 +35,31 @@ def update_stocks(stocks: list) -> dict:
     return r.json()
 
 
+from datetime import datetime, timedelta, timezone
+
 def get_fbs_postings(limit: int = 10) -> dict:
     """
     Получить список FBS-отправлений (режим отладки).
-    Печатаем полный ответ Ozon, даже если он вернул 400,
-    чтобы понять, какие поля фильтра ему нужны.
+    Теперь указываем обязательные поля processed_at_from / processed_at_to.
+    Берём заказы за последние 7 дней.
     """
     url = f"{BASE_URL}/v3/posting/fbs/list"
+
+    now_utc = datetime.now(timezone.utc)
+    week_ago = now_utc - timedelta(days=7)
+
+    processed_at_from = week_ago.isoformat(timespec="seconds").replace("+00:00", "Z")
+    processed_at_to = now_utc.isoformat(timespec="seconds").replace("+00:00", "Z")
 
     body = {
         "limit": limit,
         "offset": 0,
         "dir": "ASC",
         "filter": {
-            # пока минимально, дальше подстроим по ответу Ozon
-            # если будет ругаться на since/to — добавим
+            "processed_at_from": processed_at_from,
+            "processed_at_to": processed_at_to,
+            # статус пока не указываем, чтобы лишний раз не ловить ошибки,
+            # потом можно сузить до нужных (например, delivered / cancelled и т.п.)
         },
         "with": {
             "analytics_data": True,
@@ -59,17 +69,15 @@ def get_fbs_postings(limit: int = 10) -> dict:
 
     r = requests.post(url, json=body, headers=HEADERS)
 
-    # >>> ОЧЕНЬ ВАЖНО: печатаем ответ ВСЕГДА <<<
     print("=== Ответ Ozon /v3/posting/fbs/list ===")
     print("HTTP status:", r.status_code)
     print("Response text:")
     print(r.text)
     print("=== /Ответ Ozon ===\n")
 
-    # А теперь уже стандартно бросаем ошибку, если статус не 2xx
     r.raise_for_status()
-
     return r.json()
+
 
 
 if __name__ == "__main__":
