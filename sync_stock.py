@@ -6,7 +6,8 @@ from ozon_client import update_stocks
 
 load_dotenv()
 
-WAREHOUSE_ID = os.getenv("OZON_WAREHOUSE_ID")
+WAREHOUSE_ID = int(os.getenv("OZON_WAREHOUSE_ID", "0"))
+DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
 
 if not WAREHOUSE_ID:
     raise RuntimeError("Не задан OZON_WAREHOUSE_ID в .env")
