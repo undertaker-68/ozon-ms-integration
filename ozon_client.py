@@ -1,7 +1,8 @@
 import os
+from datetime import datetime, timedelta, timezone
+
 import requests
 from dotenv import load_dotenv
-from datetime import datetime, timedelta, timezone
 
 load_dotenv()
 
@@ -36,14 +37,12 @@ def update_stocks(stocks: list) -> dict:
     return r.json()
 
 
-from datetime import datetime, timedelta, timezone
-
-from datetime import datetime, timedelta, timezone
-
 def get_fbs_postings(limit: int = 10) -> dict:
     """
     Получить список FBS-отправлений (режим отладки).
-    Теперь используем вложенный объект processed_at: {from, to}.
+
+    ВАЖНО: Ozon требует поля processed_at_from / processed_at_to
+    прямо в filter, а не вложенный объект.
     Берём отправления за последние 7 дней.
     """
     url = f"{BASE_URL}/v3/posting/fbs/list"
@@ -59,18 +58,21 @@ def get_fbs_postings(limit: int = 10) -> dict:
         "offset": 0,
         "dir": "ASC",
         "filter": {
-            "processed_at": {
-                "from": processed_at_from,
-                "to": processed_at_to,
-            },
-            # статус пока не указываем, чтобы лишний раз не ловить ошибки;
-            # потом можно будет сузить до нужных статусов
+            # ВАЖНО: плоские поля, а не вложенный объект
+            "processed_at_from": processed_at_from,
+            "processed_at_to": processed_at_to,
+            # статус пока не указываем, потом можно будет сузить
+            # "status": "delivered",
         },
         "with": {
             "analytics_data": True,
             "financial_data": True,
         },
     }
+
+    print("=== Тело запроса к Ozon /v3/posting/fbs/list ===")
+    print(body)
+    print("=== /Тело запроса ===\n")
 
     r = requests.post(url, json=body, headers=HEADERS)
 
@@ -85,6 +87,7 @@ def get_fbs_postings(limit: int = 10) -> dict:
 
 
 if __name__ == "__main__":
+    # небольшой тест: пустое обновление остатков
     print("=== Тест пустого запроса к /v2/products/stocks ===")
     test_resp = update_stocks([])
     print(test_resp)
