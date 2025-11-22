@@ -1,7 +1,6 @@
-import os
 from datetime import datetime, timedelta, timezone
-
 import requests
+import os
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -21,49 +20,33 @@ HEADERS = {
 BASE_URL = "https://api-seller.ozon.ru"
 
 
-def update_stocks(stocks: list) -> dict:
-    """
-    Обновить остатки товаров на складах Ozon.
-
-    stocks = [
-      {"offer_id": "ART123", "stock": 10, "warehouse_id": 22254230484000},
-      ...
-    ]
-    """
-    url = f"{BASE_URL}/v2/products/stocks"
-    body = {"stocks": stocks}
-    r = requests.post(url, json=body, headers=HEADERS)
-    r.raise_for_status()
-    return r.json()
-
-
 def get_fbs_postings(limit: int = 10) -> dict:
     """
-    Получить список FBS-отправлений (режим отладки).
+    Получить список FBS-отправлений за последние 7 дней.
 
-    ВАЖНО: Ozon требует поля processed_at_from / processed_at_to
-    прямо в filter, а не вложенный объект.
-    Берём отправления за последние 7 дней.
+    Используем поля filter.since и filter.to,
+    как в официальном примере документации.
     """
+
     url = f"{BASE_URL}/v3/posting/fbs/list"
 
     now_utc = datetime.now(timezone.utc)
     week_ago = now_utc - timedelta(days=7)
 
-    processed_at_from = week_ago.isoformat(timespec="seconds").replace("+00:00", "Z")
-    processed_at_to = now_utc.isoformat(timespec="seconds").replace("+00:00", "Z")
+    since = week_ago.isoformat(timespec="seconds").replace("+00:00", "Z")
+    to = now_utc.isoformat(timespec="seconds").replace("+00:00", "Z")
 
     body = {
-        "limit": limit,
-        "offset": 0,
         "dir": "ASC",
         "filter": {
-            # ВАЖНО: плоские поля, а не вложенный объект
-            "processed_at_from": processed_at_from,
-            "processed_at_to": processed_at_to,
-            # статус пока не указываем, потом можно будет сузить
-            # "status": "delivered",
+            "since": since,
+            "to": to,
+            # статус можно пока не указывать, чтобы увидеть все:
+            # "status": "awaiting_packaging",
+            # по желанию потом добавим warehouse_id и др. фильтры
         },
+        "limit": limit,
+        "offset": 0,
         "with": {
             "analytics_data": True,
             "financial_data": True,
@@ -84,10 +67,3 @@ def get_fbs_postings(limit: int = 10) -> dict:
 
     r.raise_for_status()
     return r.json()
-
-
-if __name__ == "__main__":
-    # небольшой тест: пустое обновление остатков
-    print("=== Тест пустого запроса к /v2/products/stocks ===")
-    test_resp = update_stocks([])
-    print(test_resp)
