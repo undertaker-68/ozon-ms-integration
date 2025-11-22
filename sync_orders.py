@@ -21,9 +21,9 @@ def build_customer_order_payload(posting: dict, ms_positions: list) -> dict:
         "name": f"OZON-{posting_number}",
         "description": "Заказ из Ozon (dry-run, пока без создания в МойСклад)",
         # Эти поля позже заменим на реальные meta-объекты организации/контрагента/склада:
-        "organization": {"meta": {"href": "https://api.moysklad.ru/api/remap/1.2/entity/organization/XXX"}},
-        "agent": {"meta": {"href": "https://api.moysklad.ru/api/remap/1.2/entity/counterparty/YYY"}},
-        "store": {"meta": {"href": "https://api.moysklad.ru/api/remap/1.2/entity/store/ZZZ"}},
+        "organization": {"meta": {"href": "https://api.moysklad.ru/api/remap/1.2/entity/organization/4116ceb4-6f3d-11eb-0a80-007800235ec3"}},
+        "agent": {"meta": {"href": "https://api.moysklad.ru/api/remap/1.2/entity/counterparty/0da0f1f4-c762-11f0-0a80-1b110015ba01"}},
+        "store": {"meta": {"href": "https://api.moysklad.ru/api/remap/1.2/entity/store/03ade8fe-c762-11f0-0a80-19c80015d83e"}},
         "positions": [],
     }
 
