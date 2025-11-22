@@ -60,6 +60,15 @@ def find_product_by_article(article: str) -> dict | None:
     return rows[0] if rows else None
 
 
+def create_customer_order(payload: dict):
+    url = f"{BASE_URL}/entity/customerorder"
+    print("DRY-RUN: отправил бы в МойСклад:")
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    # r = requests.post(url, headers=HEADERS, json=payload)
+    # r.raise_for_status()
+    # return r.json()
+
+
 if __name__ == "__main__":
     print("=== Тест товаров ===")
     products = get_products(limit=1)
