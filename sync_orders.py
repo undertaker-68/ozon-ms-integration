@@ -15,30 +15,26 @@ from ms_client import (
 
 load_dotenv()
 
+# Статусы МойСклад из .env
 MS_STATE_AWAITING_PACKAGING = os.getenv("MS_STATE_AWAITING_PACKAGING")
 MS_STATE_AWAITING_SHIPMENT = os.getenv("MS_STATE_AWAITING_SHIPMENT")
 MS_STATE_DELIVERING = os.getenv("MS_STATE_DELIVERING")
 MS_STATE_CANCELLED = os.getenv("MS_STATE_CANCELLED")
 MS_STATE_COMPLETED = os.getenv("MS_STATE_COMPLETED")
 
-# Флаг "боевого режима" для заказов.
-# Пока оставляем только dry-run, потом можно будет вынести в .env
+# DRY RUN режима
 DRY_RUN_ORDERS = os.getenv("DRY_RUN_ORDERS", "true").lower() == "true"
 
 
 def build_customer_order_payload(posting: dict, ms_positions: list) -> dict:
     """
-    Сконструировать тело заказа покупателя МойСклад (черновик).
-
-    posting      — объект отправления из Ozon (один элемент из result.postings)
-    ms_positions — список найденных позиций в МойСклад (с метой и количеством)
+    Формируем черновик заказа покупателя.
     """
     posting_number = posting.get("posting_number", "NO_NUMBER")
 
     payload = {
         "name": f"OZON-{posting_number}",
         "description": "Заказ из Ozon (dry-run, пока без создания в МойСклад)",
-        # Здесь уже подставлены реальные meta.href из твоего аккаунта
         "organization": {
             "meta": {
                 "href": "https://api.moysklad.ru/api/remap/1.2/entity/organization/4116ceb4-6f3d-11eb-0a80-007800235ec3"
@@ -60,176 +56,137 @@ def build_customer_order_payload(posting: dict, ms_positions: list) -> dict:
     for pos in ms_positions:
         payload["positions"].append({
             "quantity": pos["quantity"],
-            "assortment": {
-                "meta": pos["ms_meta"],
-            },
-            "reserve": pos["quantity"],  # сразу резервируем в заказе
+            "assortment": {"meta": pos["ms_meta"]},
+            "reserve": pos["quantity"],
         })
 
     return payload
 
 
 def sync_fbs_orders(dry_run: bool = True, limit: int = 3):
-    """
-    Берём несколько FBS-отправлений из Ozon и по каждому
-    строим проект заказа покупателя для МойСклад.
-
-    Сейчас: НИЧЕГО НЕ СОЗДАЁМ, только печатаем:
-      - черновик заказа МС
-      - статус Ozon
-      - какую логику применили бы в МС
-    """
     data = get_fbs_postings(limit=limit)
 
-    result = data.get("result") or {}
-    postings = result.get("postings", [])
+    postings = data.get("result", {}).get("postings", [])
 
     if not postings:
-        print("В Ozon не найдено отправлений по заданному фильтру.")
+        print("Нет отправлений Ozon по фильтру.")
         return
 
     print(f"Найдено {len(postings)} отправлений (покажем до {limit}).")
 
     for posting in postings[:limit]:
         posting_number = posting.get("posting_number")
-        products = posting.get("products", [])
         status = posting.get("status")
+        products = posting.get("products", [])
 
         print(f"\n=== Обработка отправления {posting_number} ===")
 
         ms_positions = []
-
         for p in products:
-            offer_id = p.get("offer_id")
+            article = p.get("offer_id")
             quantity = p.get("quantity", 0)
 
-            if not offer_id:
-                print("  Пропуск товара без offer_id")
+            if not article:
+                print("  Пропущен товар без article")
                 continue
 
-            ms_product = find_product_by_article(offer_id)
-
-            if not ms_product:
-                print(f"  Не найден товар в МойСклад по артикулу {offer_id}")
+            ms_item = find_product_by_article(article)
+            if not ms_item:
+                print(f"  Не найден товар в МойСклад по артикулу {article}")
                 continue
 
             ms_positions.append({
-                "article": offer_id,
-                "ms_name": ms_product.get("name"),
-                "ms_meta": ms_product.get("meta"),  # meta товара в МС
+                "article": article,
                 "quantity": quantity,
+                "ms_meta": ms_item["meta"],
             })
 
         if not ms_positions:
-            print("  Нет ни одной позиции, которую удалось сопоставить с МойСклад.")
+            print("  Нет сопоставленных товаров.")
             continue
 
-        # Формируем черновик заказа МойСклад
+        # Собираем тело заказа
         order_payload = build_customer_order_payload(posting, ms_positions)
+        order_name = order_payload["name"]
 
-        print("  СФОРМИРОВАН ЗАКАЗ ДЛЯ МОЙСКЛАД (dry-run):")
+        print("  СФОРМИРОВАН ЗАКАЗ ДЛЯ МС (dry-run):")
         print(json.dumps(order_payload, ensure_ascii=False, indent=2))
 
         print(f"  Статус отправления в Ozon: {status}")
-        order_name = order_payload.get("name")
 
-        # === ТВОИ ПРАВИЛА ПО СТАТУСАМ ===
+        # ========== ЛОГИКА СТАТУСОВ ==========
 
-        # 1. Новые заказы Ozon → в МС статус "Ожидают сборки", заказ резервируется.
-        # Считаем, что это статус awaiting_packaging.
+        # 1 — Новый заказ: awaiting_packaging
         if status == "awaiting_packaging":
-    print("  → ЛОГИКА: создал бы в МойСклад заказ с именем "
-          f"{order_name} со статусом 'Ожидают сборки' и зарезервировал товары.")
+            print(f"  → ЛОГИКА: создать заказ {order_name}, статус 'Ожидают сборки', резервировать позиции.")
 
-    if not dry_run:
-        # 1. Пытаемся найти уже существующий заказ
-        existing = find_customer_order_by_name(order_name)
+            if not dry_run:
+                existing = find_customer_order_by_name(order_name)
+                if existing:
+                    order_href = existing["meta"]["href"]
+                else:
+                    created = create_customer_order(order_payload)
+                    order_href = created["meta"]["href"]
 
-        if existing:
-            print("  (БОЕВОЙ РЕЖИМ) Заказ уже существует в МойСклад, можно при необходимости обновить позиции.")
-            order_meta_href = existing["meta"]["href"]
-        else:
-            print("  (БОЕВОЙ РЕЖИМ) Создаём новый заказ покупателя в МойСклад.")
-            created = create_customer_order(order_payload)
-            order_meta_href = created["meta"]["href"]
+                if MS_STATE_AWAITING_PACKAGING:
+                    update_customer_order_state(order_href, MS_STATE_AWAITING_PACKAGING)
 
-        # 2. Ставим статус "Ожидают сборки", если указан href статуса
-        if MS_STATE_AWAITING_PACKAGING:
-            update_customer_order_state(order_meta_href, MS_STATE_AWAITING_PACKAGING)
-
-
-        # 2. Ozon: "Ожидают отгрузки" → МС: "Ожидают отгрузки"
-        # В Ozon это статус awaiting_deliver.
+        # 2 — Ozon: awaiting_deliver → МС: Собран
         elif status == "awaiting_deliver":
-    print("  → ЛОГИКА: нашёл бы заказ в МойСклад по имени "
-          f"{order_name} и перевёл статус на 'Ожидают отгрузки'.")
-    print("    Резерв оставляем, товары уже собраны и ждут отправки.")
+            print(f"  → ЛОГИКА: перевести заказ {order_name} в статус 'Ожидают отгрузки' (резерв остаётся).")
 
-    if not dry_run:
-        existing = find_customer_order_by_name(order_name)
-        if not existing:
-            print("  (БОЕВОЙ РЕЖИМ) ВНИМАНИЕ: заказ в МойСклад не найден, ничего не делаем.")
+            if not dry_run:
+                existing = find_customer_order_by_name(order_name)
+                if existing:
+                    order_href = existing["meta"]["href"]
+                    if MS_STATE_AWAITING_SHIPMENT:
+                        update_customer_order_state(order_href, MS_STATE_AWAITING_SHIPMENT)
+
+        # 3 — Доставляются
+        elif status == "delivering":
+            print(f"  → ЛОГИКА: {order_name} → статус 'Доставляются', снять резерв, создать Отгрузку.")
+
+            if not dry_run:
+                existing = find_customer_order_by_name(order_name)
+                if existing:
+                    order_href = existing["meta"]["href"]
+
+                    if MS_STATE_DELIVERING:
+                        update_customer_order_state(order_href, MS_STATE_DELIVERING)
+
+                    clear_reserve_for_order(order_href)
+                    create_demand_from_order(order_href)
+
+        # 4 — Отменён
+        elif status == "cancelled":
+            print(f"  → ЛОГИКА: {order_name} → статус 'Отменен', снять резерв.")
+
+            if not dry_run:
+                existing = find_customer_order_by_name(order_name)
+                if existing:
+                    order_href = existing["meta"]["href"]
+
+                    if MS_STATE_CANCELLED:
+                        update_customer_order_state(order_href, MS_STATE_CANCELLED)
+
+                    clear_reserve_for_order(order_href)
+
+        # 5 — Доставлен
+        elif status == "delivered":
+            print(f"  → ЛОГИКА: {order_name} → статус 'Доставлен' / 'Завершен'.")
+
+            if not dry_run:
+                existing = find_customer_order_by_name(order_name)
+                if existing and MS_STATE_COMPLETED:
+                    order_href = existing["meta"]["href"]
+                    update_customer_order_state(order_href, MS_STATE_COMPLETED)
+
         else:
-            order_meta_href = existing["meta"]["href"]
-            if MS_STATE_AWAITING_SHIPMENT:
-                update_customer_order_state(order_meta_href, MS_STATE_AWAITING_SHIPMENT)
+            print("  → ЛОГИКА: Статус не обработан, просто выводим информацию.")
 
-
-        # 3. Ozon: "Доставляются" → МС: "Доставляются", снять резерв и создать отгрузку
-       elif status == "delivering":
-    print("  → ЛОГИКА: нашёл бы заказ ... 'Доставляются', снял резерв и создал 'Отгрузка'.")
-
-    if not dry_run:
-        existing = find_customer_order_by_name(order_name)
-        if not existing:
-            print("  (БОЕВОЙ РЕЖИМ) ВНИМАНИЕ: заказ в МойСклад не найден, ничего не делаем.")
-        else:
-            order_meta_href = existing["meta"]["href"]
-            if MS_STATE_DELIVERING:
-                update_customer_order_state(order_meta_href, MS_STATE_DELIVERING)
-
-            # снятие резерва
-            clear_reserve_for_order(order_meta_href)
-
-            # создание отгрузки
-            create_demand_from_order(order_meta_href)
-
-
-        # 4. Ozon: "Отменён" → МС: "Отменен" и снять резерв
-       elif status == "cancelled":
-    print("  → ЛОГИКА: нашёл бы заказ ... 'Отменен' и снял резерв.")
-
-    if not dry_run:
-        existing = find_customer_order_by_name(order_name)
-        if not existing:
-            print("  (БОЕВОЙ РЕЖИМ) Заказ в МойСклад не найден, ничего не делаем.")
-        else:
-            order_meta_href = existing["meta"]["href"]
-            if MS_STATE_CANCELLED:
-                update_customer_order_state(order_meta_href, MS_STATE_CANCELLED)
-            clear_reserve_for_order(order_meta_href)
-
-        # Дополнительно: доставлен
-       elif status == "delivered":
-    print("  → ЛОГИКА: заказ доставлен. В МойСклад можно оставить финальный статус,"
-          " например 'Завершен', или не менять, в зависимости от твоей схемы.")
-
-    if not dry_run and MS_STATE_COMPLETED:
-        existing = find_customer_order_by_name(order_name)
-        if existing:
-            order_meta_href = existing["meta"]["href"]
-            update_customer_order_state(order_meta_href, MS_STATE_COMPLETED)
-
-
-        # Все остальные статусы
-        else:
-            print("  → ЛОГИКА: для этого статуса пока нет отдельной обработки,"
-                  " просто отображаем заказ.")
-
-      if not dry_run:
-    print("  (БОЕВОЙ РЕЖИМ: действия с МойСклад выполнены согласно логике выше)")
+        if not dry_run:
+            print("  (БОЕВОЙ РЕЖИМ: действия выполнены)")
 
 
 if __name__ == "__main__":
-    # ЖЁСТКО оставляем dry-run, пока ты не решишь включать боевой режим
     sync_fbs_orders(dry_run=DRY_RUN_ORDERS, limit=3)
