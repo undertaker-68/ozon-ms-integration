@@ -4,9 +4,22 @@ import os
 from dotenv import load_dotenv
 
 from ozon_client import get_fbs_postings
-from ms_client import find_product_by_article
+from ms_client import (
+    find_product_by_article,
+    create_customer_order,
+    find_customer_order_by_name,
+    update_customer_order_state,
+    clear_reserve_for_order,
+    create_demand_from_order,
+)
 
 load_dotenv()
+
+MS_STATE_AWAITING_PACKAGING = os.getenv("MS_STATE_AWAITING_PACKAGING")
+MS_STATE_AWAITING_SHIPMENT = os.getenv("MS_STATE_AWAITING_SHIPMENT")
+MS_STATE_DELIVERING = os.getenv("MS_STATE_DELIVERING")
+MS_STATE_CANCELLED = os.getenv("MS_STATE_CANCELLED")
+MS_STATE_COMPLETED = os.getenv("MS_STATE_COMPLETED")
 
 # Флаг "боевого режима" для заказов.
 # Пока оставляем только dry-run, потом можно будет вынести в .env
@@ -125,43 +138,96 @@ def sync_fbs_orders(dry_run: bool = True, limit: int = 3):
         # 1. Новые заказы Ozon → в МС статус "Ожидают сборки", заказ резервируется.
         # Считаем, что это статус awaiting_packaging.
         if status == "awaiting_packaging":
-            print("  → ЛОГИКА: создал бы в МойСклад заказ с именем "
-                  f"{order_name} со статусом 'Ожидают сборки' и зарезервировал товары.")
+    print("  → ЛОГИКА: создал бы в МойСклад заказ с именем "
+          f"{order_name} со статусом 'Ожидают сборки' и зарезервировал товары.")
+
+    if not dry_run:
+        # 1. Пытаемся найти уже существующий заказ
+        existing = find_customer_order_by_name(order_name)
+
+        if existing:
+            print("  (БОЕВОЙ РЕЖИМ) Заказ уже существует в МойСклад, можно при необходимости обновить позиции.")
+            order_meta_href = existing["meta"]["href"]
+        else:
+            print("  (БОЕВОЙ РЕЖИМ) Создаём новый заказ покупателя в МойСклад.")
+            created = create_customer_order(order_payload)
+            order_meta_href = created["meta"]["href"]
+
+        # 2. Ставим статус "Ожидают сборки", если указан href статуса
+        if MS_STATE_AWAITING_PACKAGING:
+            update_customer_order_state(order_meta_href, MS_STATE_AWAITING_PACKAGING)
+
 
         # 2. Ozon: "Ожидают отгрузки" → МС: "Ожидают отгрузки"
         # В Ozon это статус awaiting_deliver.
         elif status == "awaiting_deliver":
-            print("  → ЛОГИКА: нашёл бы заказ в МойСклад по имени "
-                  f"{order_name} и перевёл статус на 'Ожидают отгрузки'.")
-            print("    Резерв оставляем, товары уже собраны и ждут отправки.")
+    print("  → ЛОГИКА: нашёл бы заказ в МойСклад по имени "
+          f"{order_name} и перевёл статус на 'Ожидают отгрузки'.")
+    print("    Резерв оставляем, товары уже собраны и ждут отправки.")
+
+    if not dry_run:
+        existing = find_customer_order_by_name(order_name)
+        if not existing:
+            print("  (БОЕВОЙ РЕЖИМ) ВНИМАНИЕ: заказ в МойСклад не найден, ничего не делаем.")
+        else:
+            order_meta_href = existing["meta"]["href"]
+            if MS_STATE_AWAITING_SHIPMENT:
+                update_customer_order_state(order_meta_href, MS_STATE_AWAITING_SHIPMENT)
+
 
         # 3. Ozon: "Доставляются" → МС: "Доставляются", снять резерв и создать отгрузку
-        elif status == "delivering":
-            print("  → ЛОГИКА: нашёл бы заказ в МойСклад по имени "
-                  f"{order_name}, перевёл статус на 'Доставляются',")
-            print("    снял бы резерв по всем позициям и создал документ 'Отгрузка' по этому заказу.")
+       elif status == "delivering":
+    print("  → ЛОГИКА: нашёл бы заказ ... 'Доставляются', снял резерв и создал 'Отгрузка'.")
+
+    if not dry_run:
+        existing = find_customer_order_by_name(order_name)
+        if not existing:
+            print("  (БОЕВОЙ РЕЖИМ) ВНИМАНИЕ: заказ в МойСклад не найден, ничего не делаем.")
+        else:
+            order_meta_href = existing["meta"]["href"]
+            if MS_STATE_DELIVERING:
+                update_customer_order_state(order_meta_href, MS_STATE_DELIVERING)
+
+            # снятие резерва
+            clear_reserve_for_order(order_meta_href)
+
+            # создание отгрузки
+            create_demand_from_order(order_meta_href)
+
 
         # 4. Ozon: "Отменён" → МС: "Отменен" и снять резерв
-        elif status == "cancelled":
-            print("  → ЛОГИКА: нашёл бы заказ в МойСклад по имени "
-                  f"{order_name}, перевёл статус на 'Отменен' и снял резерв по всем позициям.")
+       elif status == "cancelled":
+    print("  → ЛОГИКА: нашёл бы заказ ... 'Отменен' и снял резерв.")
+
+    if not dry_run:
+        existing = find_customer_order_by_name(order_name)
+        if not existing:
+            print("  (БОЕВОЙ РЕЖИМ) Заказ в МойСклад не найден, ничего не делаем.")
+        else:
+            order_meta_href = existing["meta"]["href"]
+            if MS_STATE_CANCELLED:
+                update_customer_order_state(order_meta_href, MS_STATE_CANCELLED)
+            clear_reserve_for_order(order_meta_href)
 
         # Дополнительно: доставлен
-        elif status == "delivered":
-            print("  → ЛОГИКА: заказ доставлен. В МойСклад можно оставить финальный статус,"
-                  " например 'Завершен', или не менять, в зависимости от твоей схемы.")
+       elif status == "delivered":
+    print("  → ЛОГИКА: заказ доставлен. В МойСклад можно оставить финальный статус,"
+          " например 'Завершен', или не менять, в зависимости от твоей схемы.")
+
+    if not dry_run and MS_STATE_COMPLETED:
+        existing = find_customer_order_by_name(order_name)
+        if existing:
+            order_meta_href = existing["meta"]["href"]
+            update_customer_order_state(order_meta_href, MS_STATE_COMPLETED)
+
 
         # Все остальные статусы
         else:
             print("  → ЛОГИКА: для этого статуса пока нет отдельной обработки,"
                   " просто отображаем заказ.")
 
-        if not dry_run:
-            # Здесь в будущем будет реальный вызов функций из ms_client:
-            #   - create/update customerorder
-            #   - изменение статуса (state)
-            #   - создание отгрузки (demand)
-            print("  (боевой режим пока не включен, реально в МойСклад НИЧЕГО не отправляется)")
+      if not dry_run:
+    print("  (БОЕВОЙ РЕЖИМ: действия с МойСклад выполнены согласно логике выше)")
 
 
 if __name__ == "__main__":
