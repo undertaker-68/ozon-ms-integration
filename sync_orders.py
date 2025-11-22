@@ -91,10 +91,47 @@ def sync_fbs_orders(dry_run: bool = True, limit: int = 3):
             print("  Нет ни одной позиции, которую удалось сопоставить с МойСклад.")
             continue
 
-        order_payload = build_customer_order_payload(posting, ms_positions)
+       order_payload = build_customer_order_payload(posting, ms_positions)
 
-        print("  СФОРМИРОВАН ЗАКАЗ ДЛЯ МОЙСКЛАД (dry-run):")
-        print(json.dumps(order_payload, ensure_ascii=False, indent=2))
+print("  СФОРМИРОВАН ЗАКАЗ ДЛЯ МОЙСКЛАД (dry-run):")
+print(json.dumps(order_payload, ensure_ascii=False, indent=2))
+
+status = posting.get("status")
+print(f"  Статус отправления в Ozon: {status}")
+
+order_name = order_payload.get("name")  # например, OZON-<posting_number>
+
+# 1. Новый заказ / ожидает сборки
+if status == "awaiting_packaging":
+    print("  → ЛОГИКА: создал бы заказ в МойСклад со статусом 'Ожидают сборки' и зарезервировал товары.")
+    print(f"    (Поиск существующего заказа по имени {order_name}, если нет — создание)")
+
+# 2. Ожидает отгрузки
+elif status == "awaiting_deliver":
+    print("  → ЛОГИКА: нашёл бы заказ в МойСклад по имени и поменял статус на 'Ожидают отгрузки'.")
+    print("    Резерв оставляем (товар уже собран и ждёт отправки).")
+
+# 3. Доставляется
+elif status == "delivering":
+    print("  → ЛОГИКА: нашёл бы заказ в МойСклад, поменял статус на 'Доставляются',")
+    print("    снял бы резерв со всех позиций и создал документ 'Отгрузка' по этому заказу.")
+
+# 4. Отменён
+elif status == "cancelled":
+    print("  → ЛОГИКА: нашёл бы заказ в МойСклад, поменял статус на 'Отменен' и снял резерв по всем позициям.")
+
+# Остальные статусы пока просто выводим
+else:
+    print("  → ЛОГИКА: для этого статуса пока нет отдельной обработки, просто отображаем заказ.")
+
+if not dry_run:
+    # тут в будущем будет реальная работа с API МойСклад
+    # например:
+    #   - создание customerorder
+    #   - изменение state / reserve
+    #   - создание demand (отгрузка)
+    print("  (боевой режим отключен, пока только dry-run)")
+
 
         if not dry_run:
             # Здесь в будущем будет реальный вызов:
