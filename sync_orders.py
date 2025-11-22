@@ -1,4 +1,5 @@
 import json
+import os
 
 from dotenv import load_dotenv
 
@@ -7,32 +8,46 @@ from ms_client import find_product_by_article
 
 load_dotenv()
 
+# Флаг "боевого режима" для заказов.
+# Пока оставляем только dry-run, потом можно будет вынести в .env
+DRY_RUN_ORDERS = os.getenv("DRY_RUN_ORDERS", "true").lower() == "true"
+
 
 def build_customer_order_payload(posting: dict, ms_positions: list) -> dict:
     """
-    Сконструировать тело заказа покупателя МойСклад (пока в виде черновика).
+    Сконструировать тело заказа покупателя МойСклад (черновик).
 
     posting      — объект отправления из Ozon (один элемент из result.postings)
-    ms_positions — список найденных позиций в МойСклад (уже с артикулом, именем, qty)
+    ms_positions — список найденных позиций в МойСклад (с метой и количеством)
     """
     posting_number = posting.get("posting_number", "NO_NUMBER")
 
     payload = {
         "name": f"OZON-{posting_number}",
         "description": "Заказ из Ozon (dry-run, пока без создания в МойСклад)",
-        # Эти поля позже заменим на реальные meta-объекты организации/контрагента/склада:
-        "organization": {"meta": {"href": "https://api.moysklad.ru/api/remap/1.2/entity/organization/4116ceb4-6f3d-11eb-0a80-007800235ec3"}},
-        "agent": {"meta": {"href": "https://api.moysklad.ru/api/remap/1.2/entity/counterparty/0da0f1f4-c762-11f0-0a80-1b110015ba01"}},
-        "store": {"meta": {"href": "https://api.moysklad.ru/api/remap/1.2/entity/store/03ade8fe-c762-11f0-0a80-19c80015d83e"}},
+        # Здесь уже подставлены реальные meta.href из твоего аккаунта
+        "organization": {
+            "meta": {
+                "href": "https://api.moysklad.ru/api/remap/1.2/entity/organization/4116ceb4-6f3d-11eb-0a80-007800235ec3"
+            }
+        },
+        "agent": {
+            "meta": {
+                "href": "https://api.moysklad.ru/api/remap/1.2/entity/counterparty/0da0f1f4-c762-11f0-0a80-1b110015ba01"
+            }
+        },
+        "store": {
+            "meta": {
+                "href": "https://api.moysklad.ru/api/remap/1.2/entity/store/03ade8fe-c762-11f0-0a80-19c80015d83e"
+            }
+        },
         "positions": [],
     }
 
     for pos in ms_positions:
         payload["positions"].append({
-            # пока без реального meta товара и цен, только скелет
             "quantity": pos["quantity"],
             "assortment": {
-                # сюда позже подставим ms_product["meta"]
                 "meta": pos["ms_meta"],
             },
             "reserve": pos["quantity"],  # сразу резервируем в заказе
@@ -45,12 +60,16 @@ def sync_fbs_orders(dry_run: bool = True, limit: int = 3):
     """
     Берём несколько FBS-отправлений из Ozon и по каждому
     строим проект заказа покупателя для МойСклад.
-    НИЧЕГО НЕ СОЗДАЁМ, только печатаем JSON.
+
+    Сейчас: НИЧЕГО НЕ СОЗДАЁМ, только печатаем:
+      - черновик заказа МС
+      - статус Ozon
+      - какую логику применили бы в МС
     """
     data = get_fbs_postings(limit=limit)
 
-    result = data.get("result") or data.get("result", {})
-    postings = result.get("postings", []) if isinstance(result, dict) else []
+    result = data.get("result") or {}
+    postings = result.get("postings", [])
 
     if not postings:
         print("В Ozon не найдено отправлений по заданному фильтру.")
@@ -61,6 +80,7 @@ def sync_fbs_orders(dry_run: bool = True, limit: int = 3):
     for posting in postings[:limit]:
         posting_number = posting.get("posting_number")
         products = posting.get("products", [])
+        status = posting.get("status")
 
         print(f"\n=== Обработка отправления {posting_number} ===")
 
@@ -83,7 +103,7 @@ def sync_fbs_orders(dry_run: bool = True, limit: int = 3):
             ms_positions.append({
                 "article": offer_id,
                 "ms_name": ms_product.get("name"),
-                "ms_meta": ms_product.get("meta"),  # пригодится для реального заказа
+                "ms_meta": ms_product.get("meta"),  # meta товара в МС
                 "quantity": quantity,
             })
 
@@ -91,67 +111,59 @@ def sync_fbs_orders(dry_run: bool = True, limit: int = 3):
             print("  Нет ни одной позиции, которую удалось сопоставить с МойСклад.")
             continue
 
-       order_payload = build_customer_order_payload(posting, ms_positions)
+        # Формируем черновик заказа МойСклад
+        order_payload = build_customer_order_payload(posting, ms_positions)
 
-print("  СФОРМИРОВАН ЗАКАЗ ДЛЯ МОЙСКЛАД (dry-run):")
-print(json.dumps(order_payload, ensure_ascii=False, indent=2))
+        print("  СФОРМИРОВАН ЗАКАЗ ДЛЯ МОЙСКЛАД (dry-run):")
+        print(json.dumps(order_payload, ensure_ascii=False, indent=2))
 
-status = posting.get("status")
-print(f"  Статус отправления в Ozon: {status}")
+        print(f"  Статус отправления в Ozon: {status}")
+        order_name = order_payload.get("name")
 
-order_name = order_payload.get("name")  # например, OZON-<posting_number>
+        # === ТВОИ ПРАВИЛА ПО СТАТУСАМ ===
 
-# 1. Новый заказ / ожидает сборки
-if status == "awaiting_packaging":
-    print("  → ЛОГИКА: создал бы заказ в МойСклад со статусом 'Ожидают сборки' и зарезервировал товары.")
-    print(f"    (Поиск существующего заказа по имени {order_name}, если нет — создание)")
+        # 1. Новые заказы Ozon → в МС статус "Ожидают сборки", заказ резервируется.
+        # Считаем, что это статус awaiting_packaging.
+        if status == "awaiting_packaging":
+            print("  → ЛОГИКА: создал бы в МойСклад заказ с именем "
+                  f"{order_name} со статусом 'Ожидают сборки' и зарезервировал товары.")
 
-# 2. Ожидает отгрузки
-elif status == "awaiting_deliver":
-    print("  → ЛОГИКА: нашёл бы заказ в МойСклад по имени и поменял статус на 'Ожидают отгрузки'.")
-    print("    Резерв оставляем (товар уже собран и ждёт отправки).")
+        # 2. Ozon: "Ожидают отгрузки" → МС: "Ожидают отгрузки"
+        # В Ozon это статус awaiting_deliver.
+        elif status == "awaiting_deliver":
+            print("  → ЛОГИКА: нашёл бы заказ в МойСклад по имени "
+                  f"{order_name} и перевёл статус на 'Ожидают отгрузки'.")
+            print("    Резерв оставляем, товары уже собраны и ждут отправки.")
 
-# 3. Доставляется
-elif status == "delivering":
-    print("  → ЛОГИКА: нашёл бы заказ в МойСклад, поменял статус на 'Доставляются',")
-    print("    снял бы резерв со всех позиций и создал документ 'Отгрузка' по этому заказу.")
+        # 3. Ozon: "Доставляются" → МС: "Доставляются", снять резерв и создать отгрузку
+        elif status == "delivering":
+            print("  → ЛОГИКА: нашёл бы заказ в МойСклад по имени "
+                  f"{order_name}, перевёл статус на 'Доставляются',")
+            print("    снял бы резерв по всем позициям и создал документ 'Отгрузка' по этому заказу.")
 
-# 4. Отменён
-elif status == "cancelled":
-    print("  → ЛОГИКА: нашёл бы заказ в МойСклад, поменял статус на 'Отменен' и снял резерв по всем позициям.")
+        # 4. Ozon: "Отменён" → МС: "Отменен" и снять резерв
+        elif status == "cancelled":
+            print("  → ЛОГИКА: нашёл бы заказ в МойСклад по имени "
+                  f"{order_name}, перевёл статус на 'Отменен' и снял резерв по всем позициям.")
 
-# Остальные статусы пока просто выводим
-else:
-    print("  → ЛОГИКА: для этого статуса пока нет отдельной обработки, просто отображаем заказ.")
+        # Дополнительно: доставлен
+        elif status == "delivered":
+            print("  → ЛОГИКА: заказ доставлен. В МойСклад можно оставить финальный статус,"
+                  " например 'Завершен', или не менять, в зависимости от твоей схемы.")
 
-if not dry_run:
-    # тут в будущем будет реальная работа с API МойСклад
-    # например:
-    #   - создание customerorder
-    #   - изменение state / reserve
-    #   - создание demand (отгрузка)
-    print("  (боевой режим отключен, пока только dry-run)")
-
+        # Все остальные статусы
+        else:
+            print("  → ЛОГИКА: для этого статуса пока нет отдельной обработки,"
+                  " просто отображаем заказ.")
 
         if not dry_run:
-            # Здесь в будущем будет реальный вызов:
-            #   ms_client.create_customer_order(order_payload)
-            # Сейчас — только dry-run.
-            print("  (боевой режим ещё не реализован, dry_run принудительно включен)")
-
-elif status == "delivered":
-    print("  → ЛОГИКА: заказ успешно доставлен, в МойСклад можно закрыть заказ / никак не менять.")
-
-
-def create_customer_order(payload: dict):
-    url = f"{BASE_URL}/entity/customerorder"
-    print("DRY-RUN: отправил бы в МойСклад:")
-    print(json.dumps(payload, ensure_ascii=False, indent=2))
-    # r = requests.post(url, headers=HEADERS, json=payload)
-    # r.raise_for_status()
-    # return r.json()
+            # Здесь в будущем будет реальный вызов функций из ms_client:
+            #   - create/update customerorder
+            #   - изменение статуса (state)
+            #   - создание отгрузки (demand)
+            print("  (боевой режим пока не включен, реально в МойСклад НИЧЕГО не отправляется)")
 
 
 if __name__ == "__main__":
-    # ЖЁСТКО оставляем dry_run=True, чтобы случайно ничего не создать
-    sync_fbs_orders(dry_run=True, limit=3)
+    # ЖЁСТКО оставляем dry-run, пока ты не решишь включать боевой режим
+    sync_fbs_orders(dry_run=DRY_RUN_ORDERS, limit=3)
