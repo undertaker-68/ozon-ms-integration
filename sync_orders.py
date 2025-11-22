@@ -20,7 +20,7 @@ MS_STATE_AWAITING_PACKAGING = os.getenv("MS_STATE_AWAITING_PACKAGING")
 MS_STATE_AWAITING_SHIPMENT = os.getenv("MS_STATE_AWAITING_SHIPMENT")
 MS_STATE_DELIVERING = os.getenv("MS_STATE_DELIVERING")
 MS_STATE_CANCELLED = os.getenv("MS_STATE_CANCELLED")
-MS_STATE_COMPLETED = os.getenv("MS_STATE_COMPLETED")
+MS_STATE_DELIVERED = os.getenv("MS_STATE_DELIVERED")
 
 # DRY RUN режима
 DRY_RUN_ORDERS = os.getenv("DRY_RUN_ORDERS", "true").lower() == "true"
@@ -172,14 +172,15 @@ def sync_fbs_orders(dry_run: bool = True, limit: int = 3):
                     clear_reserve_for_order(order_href)
 
         # 5 — Доставлен
-        elif status == "delivered":
-            print(f"  → ЛОГИКА: {order_name} → статус 'Доставлен' / 'Завершен'.")
+      elif status == "delivered":
+    print(f"  → ЛОГИКА: {order_name} → статус 'Доставлен' / 'Завершен'.")
 
-            if not dry_run:
-                existing = find_customer_order_by_name(order_name)
-                if existing and MS_STATE_COMPLETED:
-                    order_href = existing["meta"]["href"]
-                    update_customer_order_state(order_href, MS_STATE_COMPLETED)
+    if not dry_run and MS_STATE_DELIVERED:
+        existing = find_customer_order_by_name(order_name)
+        if existing:
+            order_href = existing["meta"]["href"]
+            update_customer_order_state(order_href, MS_STATE_DELIVERED)
+
 
         else:
             print("  → ЛОГИКА: Статус не обработан, просто выводим информацию.")
