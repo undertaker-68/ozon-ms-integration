@@ -139,6 +139,10 @@ if not dry_run:
             # Сейчас — только dry-run.
             print("  (боевой режим ещё не реализован, dry_run принудительно включен)")
 
+elif status == "delivered":
+    print("  → ЛОГИКА: заказ успешно доставлен, в МойСклад можно закрыть заказ / никак не менять.")
+
+
 def create_customer_order(payload: dict):
     url = f"{BASE_URL}/entity/customerorder"
     print("DRY-RUN: отправил бы в МойСклад:")
