@@ -1,7 +1,7 @@
-from datetime import datetime, timedelta, timezone
-import requests
 import os
+import requests
 from dotenv import load_dotenv
+from datetime import datetime, timedelta, timezone
 
 load_dotenv()
 
@@ -16,6 +16,49 @@ HEADERS = {
     "Api-Key": API_KEY,
     "Content-Type": "application/json",
 }
+
+OZON_API_URL = "https://api-seller.ozon.ru"
+
+
+def update_stocks(stocks: list):
+    """
+    Обновление остатков в Ozon.
+    Ожидает список словарей вида:
+    {
+        "offer_id": "123",
+        "stock": 10,
+        "warehouse_id": 22254230484000
+    }
+
+    На стороне Ozon это мапится на /v2/products/stocks.
+    """
+    url = f"{OZON_API_URL}/v2/products/stocks"
+
+    if not stocks:
+        print("update_stocks: передан пустой список stocks, запрос к Ozon не отправляется.")
+        return {"result": "no_stocks"}
+
+    body = {
+        "stocks": stocks
+    }
+
+    print("=== Тело запроса к Ozon /v2/products/stocks ===")
+    print(body)
+    print("=== /Тело запроса ===\n")
+
+    r = requests.post(url, json=body, headers=HEADERS)
+
+    print("=== Ответ Ozon /v2/products/stocks ===")
+    print("HTTP status:", r.status_code)
+    try:
+        print("JSON:", r.json())
+    except Exception:
+        print("TEXT:", r.text)
+    print("=== /Ответ Ozon ===\n")
+
+    r.raise_for_status()
+    return r.json()
+
 
 BASE_URL = "https://api-seller.ozon.ru"
 
