@@ -65,7 +65,6 @@ def main(dry_run: bool | None = None):
         print("Нет данных по остаткам из МойСклад.")
         return
 
-    print(f"После фильтрации по состоянию Ozon осталось {len(active_stocks)} активных позиций.")
     if archived_skipped:
         print("Следующие товары НЕ будут синхронизироваться (архив или не найдены на Ozon):")
         for oid, state in archived_skipped[:20]:
