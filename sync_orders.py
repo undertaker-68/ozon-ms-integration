@@ -13,6 +13,8 @@ from ms_client import (
     create_demand_from_order,
 )
 
+from notifier import send_telegram_message
+
 load_dotenv()
 
 # Статусы МойСклад из .env
@@ -90,10 +92,16 @@ def sync_fbs_orders(dry_run: bool = True, limit: int = 3):
                 print("  Пропущен товар без article")
                 continue
 
-            ms_item = find_product_by_article(article)
-            if not ms_item:
-                print(f"  Не найден товар в МойСклад по артикулу {article}")
-                continue
+           ms_item = find_product_by_article(article)
+if not ms_item:
+    msg = (
+        "❗ Не найден товар в МойСклад по артикулу из Ozon\n"
+        f"Отправление: {posting_number}\n"
+        f"Артикул (offer_id): {article}"
+    )
+    print("  " + msg.replace("\n", "\n  "))
+    send_telegram_message(msg)
+    continue
 
             ms_positions.append({
                 "article": article,
@@ -101,9 +109,16 @@ def sync_fbs_orders(dry_run: bool = True, limit: int = 3):
                 "ms_meta": ms_item["meta"],
             })
 
-        if not ms_positions:
-            print("  Нет сопоставленных товаров.")
-            continue
+      if not ms_positions:
+    msg = (
+        "❗ Для отправления Ozon не найден ни один товар в МойСклад\n"
+        f"Отправление: {posting_number}\n"
+        f"Статус Ozon: {status}"
+    )
+    print("  " + msg.replace("\n", "\n  "))
+    send_telegram_message(msg)
+    continue
+
 
         # Собираем тело заказа
         order_payload = build_customer_order_payload(posting, ms_positions)
