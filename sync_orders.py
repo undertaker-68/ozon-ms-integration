@@ -131,7 +131,7 @@ def sync_fbs_orders(dry_run: bool = True, limit: int = 3):
                 if MS_STATE_AWAITING_PACKAGING:
                     update_customer_order_state(order_href, MS_STATE_AWAITING_PACKAGING)
 
-        # 2 — Ozon: awaiting_deliver → МС: Собран
+        # 2 — Ozon: awaiting_deliver → МС: Собран (Ожидают отгрузки)
         elif status == "awaiting_deliver":
             print(f"  → ЛОГИКА: перевести заказ {order_name} в статус 'Ожидают отгрузки' (резерв остаётся).")
 
@@ -172,16 +172,16 @@ def sync_fbs_orders(dry_run: bool = True, limit: int = 3):
                     clear_reserve_for_order(order_href)
 
         # 5 — Доставлен
-      elif status == "delivered":
-    print(f"  → ЛОГИКА: {order_name} → статус 'Доставлен' / 'Завершен'.")
+        elif status == "delivered":
+            print(f"  → ЛОГИКА: {order_name} → статус 'Доставлен' / 'Завершен'.")
 
-    if not dry_run and MS_STATE_DELIVERED:
-        existing = find_customer_order_by_name(order_name)
-        if existing:
-            order_href = existing["meta"]["href"]
-            update_customer_order_state(order_href, MS_STATE_DELIVERED)
+            if not dry_run and MS_STATE_DELIVERED:
+                existing = find_customer_order_by_name(order_name)
+                if existing:
+                    order_href = existing["meta"]["href"]
+                    update_customer_order_state(order_href, MS_STATE_DELIVERED)
 
-
+        # 6 — все остальные статусы
         else:
             print("  → ЛОГИКА: Статус не обработан, просто выводим информацию.")
 
