@@ -186,7 +186,7 @@ if not ms_item:
 
                     clear_reserve_for_order(order_href)
 
-        # 5 — Доставлен
+               # 5 — Доставлен
         elif status == "delivered":
             print(f"  → ЛОГИКА: {order_name} → статус 'Доставлен' / 'Завершен'.")
 
