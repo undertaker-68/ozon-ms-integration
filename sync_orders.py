@@ -12,7 +12,6 @@ from ms_client import (
     clear_reserve_for_order,
     create_demand_from_order,
 )
-
 from notifier import send_telegram_message
 
 load_dotenv()
@@ -24,19 +23,19 @@ MS_STATE_DELIVERING = os.getenv("MS_STATE_DELIVERING")
 MS_STATE_CANCELLED = os.getenv("MS_STATE_CANCELLED")
 MS_STATE_DELIVERED = os.getenv("MS_STATE_DELIVERED")
 
-# DRY RUN режима
-DRY_RUN_ORDERS = os.getenv("DRY_RUN_ORDERS", "true").lower() == "true"
+# Режим dry-run для заказов
+DRY_RUN_ORDERS = os.getenv("DRY_RUN_ORDERS", os.getenv("DRY_RUN", "true")).lower() == "true"
 
 
 def build_customer_order_payload(posting: dict, ms_positions: list) -> dict:
     """
-    Формируем черновик заказа покупателя.
+    Формируем черновик заказа покупателя для МойСклад.
     """
     posting_number = posting.get("posting_number", "NO_NUMBER")
 
     payload = {
         "name": f"OZON-{posting_number}",
-        "description": "Заказ из Ozon (dry-run, пока без создания в МойСклад)",
+        "description": "Заказ из Ozon (создан скриптом интеграции)",
         "organization": {
             "meta": {
                 "href": "https://api.moysklad.ru/api/remap/1.2/entity/organization/4116ceb4-6f3d-11eb-0a80-007800235ec3"
@@ -56,18 +55,22 @@ def build_customer_order_payload(posting: dict, ms_positions: list) -> dict:
     }
 
     for pos in ms_positions:
-        payload["positions"].append({
-            "quantity": pos["quantity"],
-            "assortment": {"meta": pos["ms_meta"]},
-            "reserve": pos["quantity"],
-        })
+        payload["positions"].append(
+            {
+                "quantity": pos["quantity"],
+                "assortment": {"meta": pos["ms_meta"]},
+                "reserve": pos["quantity"],
+            }
+        )
 
     return payload
 
 
 def sync_fbs_orders(dry_run: bool = True, limit: int = 3):
+    """
+    Основная функция синхронизации FBS-отправлений из Ozon в МойСклад.
+    """
     data = get_fbs_postings(limit=limit)
-
     postings = data.get("result", {}).get("postings", [])
 
     if not postings:
@@ -84,47 +87,50 @@ def sync_fbs_orders(dry_run: bool = True, limit: int = 3):
         print(f"\n=== Обработка отправления {posting_number} ===")
 
         ms_positions = []
+
+        # --- Сопоставление товаров Ozon ↔ МойСклад ---
         for p in products:
             article = p.get("offer_id")
             quantity = p.get("quantity", 0)
 
             if not article:
-                print("  Пропущен товар без article")
+                print("  Пропущен товар без article (offer_id).")
                 continue
 
-           ms_item = find_product_by_article(article)
-if not ms_item:
-    msg = (
-        "❗ Не найден товар в МойСклад по артикулу из Ozon\n"
-        f"Отправление: {posting_number}\n"
-        f"Артикул (offer_id): {article}"
-    )
-    print("  " + msg.replace("\n", "\n  "))
-    send_telegram_message(msg)
-    continue
+            ms_item = find_product_by_article(article)
+            if not ms_item:
+                msg = (
+                    "❗ Не найден товар в МойСклад по артикулу из Ozon\n"
+                    f"Отправление: {posting_number}\n"
+                    f"Артикул (offer_id): {article}"
+                )
+                print("  " + msg.replace("\n", "\n  "))
+                send_telegram_message(msg)
+                continue
 
-            ms_positions.append({
-                "article": article,
-                "quantity": quantity,
-                "ms_meta": ms_item["meta"],
-            })
+            ms_positions.append(
+                {
+                    "article": article,
+                    "quantity": quantity,
+                    "ms_meta": ms_item["meta"],
+                }
+            )
 
-      if not ms_positions:
-    msg = (
-        "❗ Для отправления Ozon не найден ни один товар в МойСклад\n"
-        f"Отправление: {posting_number}\n"
-        f"Статус Ozon: {status}"
-    )
-    print("  " + msg.replace("\n", "\n  "))
-    send_telegram_message(msg)
-    continue
+        if not ms_positions:
+            msg = (
+                "❗ Для отправления Ozon не найден ни один товар в МойСклад\n"
+                f"Отправление: {posting_number}\n"
+                f"Статус Ozon: {status}"
+            )
+            print("  " + msg.replace("\n", "\n  "))
+            send_telegram_message(msg)
+            continue
 
-
-        # Собираем тело заказа
+        # --- Формируем тело заказа МойСклад ---
         order_payload = build_customer_order_payload(posting, ms_positions)
         order_name = order_payload["name"]
 
-        print("  СФОРМИРОВАН ЗАКАЗ ДЛЯ МС (dry-run):")
+        print("  СФОРМИРОВАН ЗАКАЗ ДЛЯ МС (dry-run-предпросмотр):")
         print(json.dumps(order_payload, ensure_ascii=False, indent=2))
 
         print(f"  Статус отправления в Ozon: {status}")
@@ -133,7 +139,10 @@ if not ms_item:
 
         # 1 — Новый заказ: awaiting_packaging
         if status == "awaiting_packaging":
-            print(f"  → ЛОГИКА: создать заказ {order_name}, статус 'Ожидают сборки', резервировать позиции.")
+            print(
+                f"  → ЛОГИКА: создать заказ {order_name}, статус 'Ожидают сборки', "
+                f"зарезервировать позиции."
+            )
 
             if not dry_run:
                 existing = find_customer_order_by_name(order_name)
@@ -148,7 +157,10 @@ if not ms_item:
 
         # 2 — Ozon: awaiting_deliver → МС: Собран (Ожидают отгрузки)
         elif status == "awaiting_deliver":
-            print(f"  → ЛОГИКА: перевести заказ {order_name} в статус 'Ожидают отгрузки' (резерв остаётся).")
+            print(
+                f"  → ЛОГИКА: перевести заказ {order_name} в статус 'Ожидают отгрузки', "
+                f"резерв оставить."
+            )
 
             if not dry_run:
                 existing = find_customer_order_by_name(order_name)
@@ -159,7 +171,10 @@ if not ms_item:
 
         # 3 — Доставляются
         elif status == "delivering":
-            print(f"  → ЛОГИКА: {order_name} → статус 'Доставляются', снять резерв, создать Отгрузку.")
+            print(
+                f"  → ЛОГИКА: {order_name} → статус 'Доставляются', снять резерв, "
+                f"создать Отгрузку."
+            )
 
             if not dry_run:
                 existing = find_customer_order_by_name(order_name)
@@ -174,7 +189,9 @@ if not ms_item:
 
         # 4 — Отменён
         elif status == "cancelled":
-            print(f"  → ЛОГИКА: {order_name} → статус 'Отменен', снять резерв.")
+            print(
+                f"  → ЛОГИКА: {order_name} → статус 'Отменен', снять резерв (если был)."
+            )
 
             if not dry_run:
                 existing = find_customer_order_by_name(order_name)
@@ -186,9 +203,12 @@ if not ms_item:
 
                     clear_reserve_for_order(order_href)
 
-               # 5 — Доставлен
+        # 5 — Доставлен
         elif status == "delivered":
-            print(f"  → ЛОГИКА: {order_name} → статус 'Доставлен' / 'Завершен'.")
+            print(
+                f"  → ЛОГИКА: {order_name} → статус 'Доставлен' / 'Завершен' "
+                f"(финальное состояние)."
+            )
 
             if not dry_run and MS_STATE_DELIVERED:
                 existing = find_customer_order_by_name(order_name)
