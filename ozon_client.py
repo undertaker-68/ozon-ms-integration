@@ -19,6 +19,55 @@ HEADERS = {
 
 OZON_API_URL = "https://api-seller.ozon.ru"
 
+def get_products_state_by_offer_ids(offer_ids):
+    """
+    Возвращает словарь {offer_id: state} для переданных offer_id.
+    state, как правило: ACTIVE, ARCHIVED, DISABLED и т.п.
+    """
+    if not offer_ids:
+        return {}
+
+    url = f"{OZON_API_URL}/v2/products/info"
+
+    # Ozon обычно позволяет до 1000 offer_id за раз, на всякий случай батчим
+    BATCH_SIZE = 1000
+    result = {}
+
+    for i in range(0, len(offer_ids), BATCH_SIZE):
+        batch = offer_ids[i:i + BATCH_SIZE]
+
+        body = {
+            "offer_id": batch,
+            "product_id": [],
+            "sku": []
+        }
+
+        print("=== Тело запроса к Ozon /v2/products/info ===")
+        print(body)
+        print("=== /Тело запроса ===\n")
+
+        r = requests.post(url, json=body, headers=HEADERS)
+        print("=== Ответ Ozon /v2/products/info ===")
+        print("HTTP status:", r.status_code)
+        try:
+            data = r.json()
+            print("JSON (фрагмент):", str(data)[:500])
+        except Exception:
+            data = {}
+            print("TEXT:", r.text[:500])
+        print("=== /Ответ Ozon ===\n")
+
+        r.raise_for_status()
+
+        items = data.get("result", [])
+        for item in items:
+            oid = item.get("offer_id")
+            state = item.get("state")  # обычно тут ARCHIVED / ACTIVE / и т.п.
+            if oid:
+                result[oid] = state
+
+    return result
+
 
 def update_stocks(stocks: list):
     """
