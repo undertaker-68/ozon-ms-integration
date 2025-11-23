@@ -6,7 +6,10 @@ from ozon_client import update_stocks
 
 load_dotenv()
 
+# ID склада Ozon из .env
 WAREHOUSE_ID_RAW = os.getenv("OZON_WAREHOUSE_ID", "0")
+
+# Общий флаг dry-run для остатков (читается из .env: DRY_RUN=true/false)
 DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
 
 try:
@@ -19,6 +22,13 @@ def build_ozon_stocks_from_ms(limit: int = 100) -> list:
     """
     Берём первые `limit` строк отчёта по остаткам из МойСклад
     и превращаем их в список словарей для Ozon.
+
+    Формат элемента:
+    {
+        "offer_id": <артикул товара = offer_id в Ozon>,
+        "stock": <доступный остаток>,
+        "warehouse_id": <ID склада Ozon>
+    }
     """
     ms_data = get_stock_all(limit=limit, offset=0)
     rows = ms_data.get("rows", [])
@@ -26,10 +36,10 @@ def build_ozon_stocks_from_ms(limit: int = 100) -> list:
     stocks = []
     for row in rows:
         article = row.get("article")
-        stock_value = row.get("stock")  # доступный остаток
+        stock_value = row.get("stock")  # доступный остаток по МойСклад
 
         if not article:
-            # если у товара нет артикула - пропускаем
+            # если у товара нет артикула - пропускаем (связать с Ozon не сможем)
             continue
 
         try:
@@ -65,15 +75,6 @@ def main(dry_run: bool | None = None):
         print("Нет данных по остаткам из МойСклад.")
         return
 
-    if archived_skipped:
-        print("Следующие товары НЕ будут синхронизироваться (архив или не найдены на Ozon):")
-        for oid, state in archived_skipped[:20]:
-            print(f"  offer_id={oid}, state={state}")
-
-    # Заменяем исходный список stocks на отфильтрованный
-    stocks = active_stocks
-
-
     print(f"Сформировано {len(stocks)} позиций для обновления остатков в Ozon.")
     print("Пример первых 5 позиций:")
     for item in stocks[:5]:
@@ -82,7 +83,6 @@ def main(dry_run: bool | None = None):
     if dry_run:
         print("\nРежим DRY_RUN=TRUE: данные в Ozon НЕ отправляются.")
         return
-        
 
     # Если dry_run=False -> реально отправляем
     print("\nОтправка остатков в Ozon...")
