@@ -45,7 +45,7 @@ def build_customer_order_payload(posting: dict, ms_positions: list) -> dict:
         },
         "agent": {
             "meta": {
-                "href": "https://api.moysklad.ru/api/remap/1.2/entity/counterparty/0da0f1f4-c762-11f0-0a80-1b110015ba01",
+                "href": "https://api.moysklad.ru/api/remap/1.2/entity/counterparty/f61bfcf9-2d74-11ec-0a80-04c700041e03",
                 "type": "counterparty",
                 "mediaType": "application/json",
             }
