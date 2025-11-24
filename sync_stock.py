@@ -2,7 +2,8 @@ import os
 from dotenv import load_dotenv
 
 from ms_client import get_stock_all
-from ozon_client import update_stocks
+from ozon_client import update_stocks, get_products_state_by_offer_ids
+from notifier import send_telegram_message
 
 load_dotenv()
 
@@ -68,6 +69,8 @@ def main(dry_run: bool | None = None):
     """
     if dry_run is None:
         dry_run = DRY_RUN
+
+    
 
     stocks = build_ozon_stocks_from_ms(limit=50)  # пока ограничимся 50 строками
 
