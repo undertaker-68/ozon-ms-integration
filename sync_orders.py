@@ -38,17 +38,23 @@ def build_customer_order_payload(posting: dict, ms_positions: list) -> dict:
         "description": "Заказ из Ozon (создан скриптом интеграции)",
         "organization": {
             "meta": {
-                "href": "https://api.moysklad.ru/api/remap/1.2/entity/organization/4116ceb4-6f3d-11eb-0a80-007800235ec3"
+                "href": "https://api.moysklad.ru/api/remap/1.2/entity/organization/4116ceb4-6f3d-11eb-0a80-007800235ec3",
+                "type": "organization",
+                "mediaType": "application/json",
             }
         },
         "agent": {
             "meta": {
-                "href": "https://api.moysklad.ru/api/remap/1.2/entity/counterparty/0da0f1f4-c762-11f0-0a80-1b110015ba01"
+                "href": "https://api.moysklad.ru/api/remap/1.2/entity/counterparty/0da0f1f4-c762-11f0-0a80-1b110015ba01",
+                "type": "counterparty",
+                "mediaType": "application/json",
             }
         },
         "store": {
             "meta": {
-                "href": "https://api.moysklad.ru/api/remap/1.2/entity/store/03ade8fe-c762-11f0-0a80-19c80015d83e"
+                "href": "https://api.moysklad.ru/api/remap/1.2/entity/store/03ade8fe-c762-11f0-0a80-19c80015d83e",
+                "type": "store",
+                "mediaType": "application/json",
             }
         },
         "positions": [],
