@@ -5,13 +5,14 @@ from dotenv import load_dotenv
 from datetime import datetime, timedelta, timezone
 
 try:
-     # наш модуль для уведомлений
+    # наш модуль для уведомлений
     from notifier import send_telegram_message
 except ImportError:
     # запасной вариант, чтобы файл не падал, если notifier нет
     def send_telegram_message(text: str) -> bool:
         print("Telegram notifier не доступен:", text)
         return False
+
 
 load_dotenv()
 
@@ -28,8 +29,10 @@ HEADERS = {
 }
 
 OZON_API_URL = "https://api-seller.ozon.ru"
+BASE_URL = OZON_API_URL
 
-def get_products_state_by_offer_ids(offer_ids):
+
+def get_products_state_by_offer_ids(offer_ids: list[str]) -> dict:
     """
     Возвращает словарь {offer_id: state} для переданных offer_id.
     state, как правило: ACTIVE, ARCHIVED, DISABLED и т.п.
@@ -41,22 +44,22 @@ def get_products_state_by_offer_ids(offer_ids):
 
     # Ozon обычно позволяет до 1000 offer_id за раз, на всякий случай батчим
     BATCH_SIZE = 1000
-    result = {}
+    result: dict[str, str | None] = {}
 
     for i in range(0, len(offer_ids), BATCH_SIZE):
-        batch = offer_ids[i:i + BATCH_SIZE]
+        batch = offer_ids[i : i + BATCH_SIZE]
 
         body = {
             "offer_id": batch,
             "product_id": [],
-            "sku": []
+            "sku": [],
         }
 
         print("=== Тело запроса к Ozon /v2/products/info ===")
         print(body)
         print("=== /Тело запроса ===\n")
 
-        r = requests.post(url, json=body, headers=HEADERS)
+        r = requests.post(url, json=body, headers=HEADERS, timeout=30)
         print("=== Ответ Ozon /v2/products/info ===")
         print("HTTP status:", r.status_code)
         try:
@@ -72,7 +75,7 @@ def get_products_state_by_offer_ids(offer_ids):
         items = data.get("result", [])
         for item in items:
             oid = item.get("offer_id")
-            state = item.get("state")  # обычно тут ARCHIVED / ACTIVE / и т.п.
+            state = item.get("state")  # обычно тут ARCHIVED / ACTIVE / DISABLED и т.п.
             if oid:
                 result[oid] = state
 
@@ -90,8 +93,6 @@ def update_stocks(stocks: list) -> dict:
         "warehouse_id": 22254230484000
     }
     """
-    OZON_API_URL = "https://api-seller.ozon.ru"
-
     if not stocks:
         print("update_stocks: передан пустой список stocks, запрос к Ozon не отправляется.")
         return {"result": []}
@@ -104,9 +105,9 @@ def update_stocks(stocks: list) -> dict:
     print("=== /Тело запроса ===\n")
 
     try:
-        r = requests.post(url, json=body, headers=HEADERS)
+        r = requests.post(url, json=body, headers=HEADERS, timeout=30)
     except Exception as e:
-        msg = f"❗ Ошибка сети при обновлении остатков в Ozon: {e}"
+        msg = f"❗ Ошибка сети при обновлении остатков в Ozon: {e!r}"
         print(msg)
         try:
             send_telegram_message(msg)
@@ -181,33 +182,22 @@ def update_stocks(stocks: list) -> dict:
     return data
 
 
-BASE_URL = "https://api-seller.ozon.ru"
-
-
-def get_fbs_postings(limit: int = 10) -> dict:
+def get_fbs_postings(limit: int = 50) -> dict:
     """
-    Получить список FBS-отправлений за последние 7 дней.
+    Получение FBS-отправлений Ozon через /v3/posting/fbs/list.
 
-    Используем поля filter.since и filter.to,
-    как в официальном примере документации.
+    Берём отправления за последние 7 дней, по умолчанию limit штук.
     """
-
     url = f"{BASE_URL}/v3/posting/fbs/list"
 
-    now_utc = datetime.now(timezone.utc)
-    week_ago = now_utc - timedelta(days=7)
-
-    since = week_ago.isoformat(timespec="seconds").replace("+00:00", "Z")
-    to = now_utc.isoformat(timespec="seconds").replace("+00:00", "Z")
+    now = datetime.now(timezone.utc)
+    since = now - timedelta(days=7)
 
     body = {
-        "dir": "ASC",
+        "dir": "DESC",
         "filter": {
-            "since": since,
-            "to": to,
-            # статус можно пока не указывать, чтобы увидеть все:
-            # "status": "awaiting_packaging",
-            # по желанию потом добавим warehouse_id и др. фильтры
+            "since": since.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "to": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
         },
         "limit": limit,
         "offset": 0,
@@ -218,10 +208,10 @@ def get_fbs_postings(limit: int = 10) -> dict:
     }
 
     print("=== Тело запроса к Ozon /v3/posting/fbs/list ===")
-    print(body)
+    print(json.dumps(body, ensure_ascii=False, indent=2))
     print("=== /Тело запроса ===\n")
 
-    r = requests.post(url, json=body, headers=HEADERS)
+    r = requests.post(url, json=body, headers=HEADERS, timeout=30)
 
     print("=== Ответ Ozon /v3/posting/fbs/list ===")
     print("HTTP status:", r.status_code)
