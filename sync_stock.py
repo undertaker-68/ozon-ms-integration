@@ -7,46 +7,41 @@ from notifier import send_telegram_message
 
 load_dotenv()
 
-WAREHOUSE_ID_ENV = os.getenv("OZON_WAREHOUSE_ID")
-if not WAREHOUSE_ID_ENV:
+WAREHOUSE_ID = int(os.getenv("OZON_WAREHOUSE_ID", "0"))
+if not WAREHOUSE_ID:
     raise RuntimeError("Не задан OZON_WAREHOUSE_ID в .env")
-WAREHOUSE_ID = int(WAREHOUSE_ID_ENV)
 
+# DRY-RUN для остатков
 DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
 
 
-def build_ozon_stocks_from_ms(limit: int = 50) -> list[dict]:
+def build_ozon_stocks_from_ms(limit: int = 100) -> list[dict]:
     """
-    Берём первые `limit` строк отчёта по остаткам из МойСклад
-    и превращаем их в список словарей для Ozon.
+    Забираем остатки из МойСклад и формируем список позиций
+    для обновления в Ozon.
 
-    Ожидается, что get_stock_all возвращает:
+    Формат каждой позиции:
     {
-        "rows": [
-            {
-                "article": "...",
-                "stock": 10,
-                ...
-            },
-            ...
-        ]
+        "offer_id": <артикул_из_МС>,
+        "stock": <доступно>,
+        "warehouse_id": WAREHOUSE_ID,
     }
     """
-    ms_data = get_stock_all(limit=limit, offset=0)
-    rows = ms_data.get("rows", [])
+    ms_items = get_stock_all(limit=limit)
+
     stocks: list[dict] = []
 
-    for row in rows:
-        article = row.get("article")
-        stock_value = row.get("stock")  # доступный остаток
-
+    for item in ms_items:
+        article = item.get("article") or item.get("name")
         if not article:
-            # если у товара нет артикула - пропускаем
+            # артикул пустой — пропускаем
             continue
+
+        stock_value = item.get("stock")  # поле "Доступно" из МойСклад
 
         try:
             stock_int = int(stock_value) if stock_value is not None else 0
-        except (ValueError, TypeError):
+        except (TypeError, ValueError):
             stock_int = 0
 
         if stock_int < 0:
@@ -55,7 +50,7 @@ def build_ozon_stocks_from_ms(limit: int = 50) -> list[dict]:
         stocks.append(
             {
                 "offer_id": article,  # артикул = offer_id в Ozon
-                "stock": stock_int,
+                "stock": stock_int,   # количество
                 "warehouse_id": WAREHOUSE_ID,
             }
         )
@@ -63,7 +58,7 @@ def build_ozon_stocks_from_ms(limit: int = 50) -> list[dict]:
     return stocks
 
 
-def main(dry_run: bool | None = None, limit: int = 50) -> None:
+def main(dry_run: bool | None = None):
     """
     dry_run:
       - True  -> только печатаем, что отправили бы в Ozon.
@@ -76,9 +71,58 @@ def main(dry_run: bool | None = None, limit: int = 50) -> None:
     print(f"DRY_RUN = {dry_run}")
     print(f"WAREHOUSE_ID = {WAREHOUSE_ID}")
 
-    stocks = build_ozon_stocks_from_ms(limit=limit)
+    stocks = build_ozon_stocks_from_ms(limit=1000)
+
     if not stocks:
         print("Нет данных по остаткам из МойСклад.")
+        return
+
+    # --- Фильтрация по состоянию товара на Ozon ---
+    # Берём только те товары, которые на Ozon "В продаже", "Готовы к продаже",
+    # "Ошибки", "На доработку". Сняты с продажи / Архив — игнорируем.
+
+    offer_ids = list({item["offer_id"] for item in stocks})
+    states = get_products_state_by_offer_ids(offer_ids)
+
+    active_stocks: list[dict] = []
+    skipped_archived: list[str] = []
+    skipped_no_state: list[str] = []
+
+    for item in stocks:
+        oid = item["offer_id"]
+        state = states.get(oid)
+
+        if state is None:
+            # на всякий случай тоже учитываем, но помечаем
+            active_stocks.append(item)
+            skipped_no_state.append(oid)
+            continue
+
+        state_str = str(state).upper()
+
+        # Логика:
+        # - ARCHIVED, DISABLED, SUSPENDED и т.п. — пропускаем
+        # - всё остальное (ACTIVE, ERROR, READY_TO_ACTIVATION и т.д.) — берём
+        if "ARCHIVE" in state_str or "ARCHIVED" in state_str or "DISABLED" in state_str:
+            skipped_archived.append(f"{oid} ({state_str})")
+            continue
+
+        # Оставляем как активный
+        active_stocks.append(item)
+
+    if skipped_archived:
+        print("Следующие товары на Ozon в архиве/сняты, остатки НЕ отправляем:")
+        for s in skipped_archived:
+            print("  -", s)
+
+    if skipped_no_state:
+        print("Для части товаров Ozon не вернул state, они будут обновлены как есть.")
+        print("Примеры offer_id:", ", ".join(skipped_no_state[:10]))
+
+    stocks = active_stocks
+
+    if not stocks:
+        print("После фильтрации по состояниям Ozon не осталось позиций для обновления.")
         return
 
     print(f"Сформировано {len(stocks)} позиций для обновления остатков в Ozon.")
@@ -86,76 +130,35 @@ def main(dry_run: bool | None = None, limit: int = 50) -> None:
     for item in stocks[:5]:
         print(item)
 
-    # --- Фильтрация по состоянию товара в Ozon ---
-    offer_ids = [s["offer_id"] for s in stocks if s.get("offer_id")]
-    states = get_products_state_by_offer_ids(offer_ids)
-
-    print("\nСостояния товаров в Ozon (первые 10):")
-    for oid in offer_ids[:10]:
-        st = states.get(oid)
-        print(f"  {oid}: {st}")
-
-    BLOCKED_STATES = {"ARCHIVED", "DISABLED"}  # Архив / сняты с продажи
-
-    filtered_stocks: list[dict] = []
-    skipped_blocked: list[tuple[str, str | None]] = []
-    skipped_unknown: list[str] = []
-
-    for s in stocks:
-        oid = s.get("offer_id")
-        state = states.get(oid)
-
-        if state in BLOCKED_STATES:
-            skipped_blocked.append((oid, state))
-            continue
-
-        if state is None:
-            # Ozon не знает такой offer_id (товар не заведен / удалён)
-            skipped_unknown.append(oid)
-            continue
-
-        filtered_stocks.append(s)
-
-    print(f"\nПосле фильтрации по состоянию Ozon осталось {len(filtered_stocks)} позиций.")
-    if skipped_blocked:
-        print("Пропущены как ARCHIVED/DISABLED:")
-        for oid, st in skipped_blocked[:10]:
-            print(f"  {oid}: {st}")
-
-    if skipped_unknown:
-        print("Пропущены, т.к. Ozon не знает offer_id (state=None):")
-        for oid in skipped_unknown[:10]:
-            print(f"  {oid}")
-
-    stocks = filtered_stocks
-    if not stocks:
-        print("После фильтрации по состоянию в Ozon не осталось позиций для обновления.")
-        return
-
-    # --- Telegram: уведомления по обнулению остатка ---
-    zero_offers = [s["offer_id"] for s in stocks if s.get("stock") == 0]
-    if zero_offers:
-        for oid in zero_offers:
-            msg = (
-                "ℹ️ Товар на складе Ozon закончился.\n"
-                f"offer_id: {oid}\n"
-                "Передаётся остаток 0 из МойСклад."
-            )
-            print("Telegram уведомление:", msg.replace("\n", " | "))
-            try:
-                send_telegram_message(msg)
-            except Exception as e:
-                print(f"Не удалось отправить сообщение в Telegram: {e!r}")
+    # --- Телеграм уведомление: «товар Ozon не найден в МойСклад» ---
+    #
+    # Это уже реализовано в sync_orders.py для заказов.
+    # Для остатков ситуация другая: мы строим список ИЗ МойСклад, поэтому
+    # здесь "Ozon не найден в МС" не возникает. Этот кейс закрыт в sync_orders.py.
 
     if dry_run:
         print("\nРежим DRY_RUN=TRUE: данные в Ozon НЕ отправляются.")
         return
 
-    # --- Боевой режим ---
+    # Если dry_run=False -> реально отправляем
     print("\nОтправка остатков в Ozon...")
     resp = update_stocks(stocks)
     print("Ответ Ozon:")
     print(resp)
+
+    # --- Телеграм-уведомление: товар на складе Ozon «закончился» ---
+    # Для простоты: отправляем уведомление для тех позиций, где передали stock == 0.
+    zero_items = [s for s in stocks if s.get("stock", 0) == 0]
+
+    if zero_items:
+        lines = ["⚠ В МойСклад передан остаток 0, считаем, что товар на Ozon закончился:"]
+        for item in zero_items[:50]:  # ограничимся 50 строками
+            lines.append(
+                f"- offer_id: {item['offer_id']}, warehouse_id: {item['warehouse_id']}, stock: 0"
+            )
+        msg = "\n".join(lines)
+        print(msg)
+        send_telegram_message(msg)
 
 
 if __name__ == "__main__":
