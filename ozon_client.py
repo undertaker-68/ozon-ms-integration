@@ -92,4 +92,128 @@ def update_stocks(stocks: list) -> dict:
 
     Ожидает список словарей вида:
     {
-        "offer_id": "ART_
+        "offer_id": "ART123",
+        "stock": 10,
+        "warehouse_id": 22254230484000
+    }
+    """
+    if not stocks:
+        print("update_stocks: передан пустой список stocks, запрос к Ozon не отправляется.")
+        return {"result": []}
+
+    url = f"{OZON_API_URL}/v2/products/stocks"
+    body = {"stocks": stocks}
+
+    # Красиво логируем тело запроса
+    print("=== Тело запроса к Ozon /v2/products/stocks ===")
+    print(json.dumps(body, ensure_ascii=False, indent=2))
+    print("=== /Тело запроса ===\n")
+
+    try:
+        r = requests.post(url, json=body, headers=HEADERS, timeout=30)
+    except Exception as e:
+        msg = f"❗ Ошибка запроса к Ozon /v2/products/stocks:\n{e}"
+        print(msg)
+        send_telegram_message(msg)
+        raise
+
+    print("=== Ответ Ozon /v2/products/stocks ===")
+    print("HTTP status:", r.status_code)
+    text_fragment = r.text[:2000]
+    print(text_fragment)
+    print("=== /Ответ Ozon ===\n")
+
+    if r.status_code != 200:
+        msg = (
+            "❗ Ozon вернул ошибку при обновлении остатков\n"
+            f"HTTP status: {r.status_code}\n"
+            f"Response: {text_fragment}"
+        )
+        send_telegram_message(msg)
+        r.raise_for_status()
+
+    try:
+        data = r.json()
+    except Exception:
+        # если не JSON — тоже ошибка
+        msg = (
+            "❗ Ozon /v2/products/stocks вернул не-JSON ответ\n"
+            f"HTTP status: {r.status_code}\n"
+            f"Response: {text_fragment}"
+        )
+        send_telegram_message(msg)
+        raise RuntimeError("Некорректный JSON от Ozon при обновлении остатков")
+
+    # Дополнительная проверка ошибок по отдельным товарам
+    result_items = data.get("result", [])
+    errors_summary = []
+
+    for item in result_items:
+        offer_id = item.get("offer_id")
+        updated = item.get("updated", False)
+        errors = item.get("errors") or []
+
+        if errors:
+            for err in errors:
+                code = err.get("code")
+                message = err.get("message")
+                msg = (
+                    "❗ Ошибка обновления остатка в Ozon по товару\n"
+                    f"offer_id: {offer_id}\n"
+                    f"code: {code}\n"
+                    f"message: {message}"
+                )
+                print(msg)
+                errors_summary.append(msg)
+
+    if errors_summary:
+        send_telegram_message("⚠ Ошибки при обновлении остатков в Ozon:\n\n" + "\n\n".join(errors_summary))
+
+    return data
+
+
+def get_fbs_postings(limit: int = 3) -> dict:
+    """
+    Получение FBS-отправлений Ozon за последние 7 дней.
+    Использует /v3/posting/fbs/list.
+    """
+    url = f"{OZON_API_URL}/v3/posting/fbs/list"
+
+    now = datetime.now(timezone.utc)
+    since = now - timedelta(days=7)
+
+    body = {
+        "dir": "ASC",
+        "filter": {
+            "since": since.isoformat(timespec="seconds").replace("+00:00", "Z"),
+            "to": now.isoformat(timespec="seconds").replace("+00:00", "Z"),
+        },
+        "limit": limit,
+        "offset": 0,
+        "with": {
+            "analytics_data": True,
+            "financial_data": True,
+        },
+    }
+
+    print("=== Тело запроса к Ozon /v3/posting/fbs/list ===")
+    print(json.dumps(body, ensure_ascii=False, indent=2))
+    print("=== /Тело запроса ===\n")
+
+    r = requests.post(url, json=body, headers=HEADERS, timeout=30)
+
+    print("=== Ответ Ozon /v3/posting/fbs/list ===")
+    print("HTTP status:", r.status_code)
+    print("Response text:")
+    print(r.text[:5000])
+    print("=== /Ответ Ozon ===\n")
+
+    r.raise_for_status()
+    return r.json()
+
+
+if __name__ == "__main__":
+    # Небольшой самотест при прямом запуске
+    print("Тест запроса FBS-отправлений...")
+    data = get_fbs_postings(limit=1)
+    print("OK, получен ответ от Ozon.")
