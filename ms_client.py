@@ -62,12 +62,24 @@ def find_product_by_article(article: str) -> dict | None:
 
 
 def create_customer_order(payload: dict) -> dict:
-    """
-    СОЗДАНИЕ заказа покупателя в МойСклад.
-    В боевом режиме сюда будем передавать order_payload из sync_orders.py.
-    """
-    url = f"{BASE_URL}/entity/customerorder"
-    r = requests.post(url, headers=HEADERS, json=payload)
+    url = "https://api.moysklad.ru/api/remap/1.2/entity/customerorder"
+    print("=== Запрос в МойСклад /entity/customerorder ===")
+    print("URL:", url)
+    print("Тело запроса (фрагмент):")
+    try:
+        print(json.dumps(payload, ensure_ascii=False, indent=2)[:2000])
+    except Exception:
+        print(str(payload)[:2000])
+    print("=== /Запрос ===")
+
+    r = requests.post(url, json=payload, headers=HEADERS, timeout=30)
+
+    print("=== Ответ МойСклад /entity/customerorder ===")
+    print("HTTP status:", r.status_code)
+    print("Тело ответа:")
+    print(r.text)
+    print("=== /Ответ ===")
+
     r.raise_for_status()
     return r.json()
 
