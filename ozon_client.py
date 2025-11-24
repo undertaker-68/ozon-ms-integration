@@ -190,8 +190,9 @@ def get_fbs_postings(limit: int = 3) -> dict:
     """
     Получение FBS-отправлений Ozon за последние 7 дней.
     Использует /v3/posting/fbs/list.
-    Ozon ожидает, что filter.status — это ОДНА строка, поэтому
-    вызываем метод по каждому статусу и суммарно набираем до `limit` штук.
+    Ozon ожидает, что filter.status — это ОДНА строка.
+    Параметр filter.fbp_filter обязателен и должен быть: ALL / ONLY / WITHOUT.
+    Мы берём ALL, чтобы видеть все FBS-отправления.
     """
     url = f"{OZON_API_URL}/v3/posting/fbs/list"
 
@@ -218,7 +219,8 @@ def get_fbs_postings(limit: int = 3) -> dict:
             "filter": {
                 "since": since.isoformat(timespec="seconds").replace("+00:00", "Z"),
                 "to": now.isoformat(timespec="seconds").replace("+00:00", "Z"),
-                "status": status,  # ОДНО значение, как требует API
+                "status": status,      # одно значение статуса
+                "fbp_filter": "ALL",   # <--- ключевой параметр
             },
             "limit": limit,
             "offset": 0,
@@ -254,9 +256,7 @@ def get_fbs_postings(limit: int = 3) -> dict:
             if len(all_postings) >= limit:
                 break
 
-    # Возвращаем в том же формате, который ожидает sync_orders.py
     return {"result": {"postings": all_postings}}
-
 
 if __name__ == "__main__":
     print("Тест запроса FBS-отправлений...")
