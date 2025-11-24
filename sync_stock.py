@@ -94,7 +94,7 @@ def main(dry_run: bool | None = None, limit: int = 100) -> None:
         state = states.get(oid)
 
         if state is None:
-            # Ozon не вернул state — считаем, что товар неизвестен
+            # Ozon не знает такой товар (нет в кабинете)
             skipped_unknown.append(oid)
             continue
 
@@ -108,48 +108,4 @@ def main(dry_run: bool | None = None, limit: int = 100) -> None:
 
     if skipped_blocked:
         print("Следующие товары на Ozon ARCHIVED/DISABLED, остатки НЕ отправляем:")
-        for s in skipped_blocked:
-            print("  -", s)
-
-    if skipped_unknown:
-        print("Для части товаров Ozon не вернул state, они пропущены.")
-        print("Примеры offer_id:", ", ".join(skipped_unknown[:10]))
-
-    stocks = active_stocks
-
-    if not stocks:
-        print("После фильтрации по состояниям Ozon не осталось позиций для обновления.")
-        return
-
-    print(f"Сформировано {len(stocks)} позиций для обновления остатков в Ozon.")
-    print("Пример первых 5 позиций:")
-    for item in stocks[:5]:
-        print(item)
-
-    # --- Телеграм: «товар на складе Ozon закончился» (stock == 0) ---
-    zero_items = [s for s in stocks if s.get("stock") == 0]
-    for item in zero_items:
-        msg = (
-            "ℹ️ Товар на складе Ozon закончился.\n"
-            f"offer_id: {item['offer_id']}\n"
-            "Передаётся остаток 0 из МойСклад."
-        )
-        print("Telegram:", msg.replace("\n", " | "))
-        try:
-            send_telegram_message(msg)
-        except Exception as e:
-            print(f"Не удалось отправить сообщение в Telegram: {e!r}")
-
-    if dry_run:
-        print("\nРежим DRY_RUN=TRUE: данные в Ozon НЕ отправляются.")
-        return
-
-    # --- Боевой режим ---
-    print("\nОтправка остатков в Ozon...")
-    resp = update_stocks(stocks)
-    print("Ответ Ozon:")
-    print(resp)
-
-
-if __name__ == "__main__":
-    main(dry_run=None, limit=100)
+        for s
