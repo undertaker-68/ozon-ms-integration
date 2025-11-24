@@ -1,72 +1,30 @@
-import json
 import os
-
+import json
 from dotenv import load_dotenv
 
 from ozon_client import get_fbs_postings
+from notifier import send_telegram_message
 from ms_client import (
     find_product_by_article,
+    build_customer_order_payload,
     create_customer_order,
     find_customer_order_by_name,
     update_customer_order_state,
     clear_reserve_for_order,
     create_demand_from_order,
+    MS_STATE_AWAITING_PACKAGING,
+    MS_STATE_AWAITING_SHIPMENT,
+    MS_STATE_DELIVERING,
+    MS_STATE_CANCELLED,
+    MS_STATE_DELIVERED,
 )
-from notifier import send_telegram_message
 
 load_dotenv()
 
-# Статусы МойСклад из .env
-MS_STATE_AWAITING_PACKAGING = os.getenv("MS_STATE_AWAITING_PACKAGING")
-MS_STATE_AWAITING_SHIPMENT = os.getenv("MS_STATE_AWAITING_SHIPMENT")
-MS_STATE_DELIVERING = os.getenv("MS_STATE_DELIVERING")
-MS_STATE_CANCELLED = os.getenv("MS_STATE_CANCELLED")
-MS_STATE_DELIVERED = os.getenv("MS_STATE_DELIVERED")
-
-# Режим dry-run для заказов
 DRY_RUN_ORDERS = os.getenv("DRY_RUN_ORDERS", os.getenv("DRY_RUN", "true")).lower() == "true"
 
 
-def build_customer_order_payload(posting: dict, ms_positions: list) -> dict:
-    """
-    Формируем черновик заказа покупателя для МойСклад.
-    """
-    posting_number = posting.get("posting_number", "NO_NUMBER")
-
-    payload = {
-        "name": f"OZON-{posting_number}",
-        "description": "Заказ из Ozon (создан скриптом интеграции)",
-        "organization": {
-            "meta": {
-                "href": "https://api.moysklad.ru/api/remap/1.2/entity/organization/4116ceb4-6f3d-11eb-0a80-007800235ec3"
-            }
-        },
-        "agent": {
-            "meta": {
-                "href": "https://api.moysklad.ru/api/remap/1.2/entity/counterparty/0da0f1f4-c762-11f0-0a80-1b110015ba01"
-            }
-        },
-        "store": {
-            "meta": {
-                "href": "https://api.moysklad.ru/api/remap/1.2/entity/store/03ade8fe-c762-11f0-0a80-19c80015d83e"
-            }
-        },
-        "positions": [],
-    }
-
-    for pos in ms_positions:
-        payload["positions"].append(
-            {
-                "quantity": pos["quantity"],
-                "assortment": {"meta": pos["ms_meta"]},
-                "reserve": pos["quantity"],
-            }
-        )
-
-    return payload
-
-
-def sync_fbs_orders(dry_run: bool = True, limit: int = 3):
+def sync_fbs_orders(dry_run: bool = True, limit: int = 3) -> None:
     """
     Основная функция синхронизации FBS-отправлений из Ozon в МойСклад.
     """
@@ -100,12 +58,15 @@ def sync_fbs_orders(dry_run: bool = True, limit: int = 3):
             ms_item = find_product_by_article(article)
             if not ms_item:
                 msg = (
-                    "❗ Не найден товар в МойСклад по артикулу из Ozon\n"
+                    "❗ Товар Ozon не найден в МойСклад.\n"
                     f"Отправление: {posting_number}\n"
                     f"Артикул (offer_id): {article}"
                 )
                 print("  " + msg.replace("\n", "\n  "))
-                send_telegram_message(msg)
+                try:
+                    send_telegram_message(msg)
+                except Exception as e:
+                    print(f"  Не удалось отправить сообщение в Telegram: {e!r}")
                 continue
 
             ms_positions.append(
@@ -123,7 +84,10 @@ def sync_fbs_orders(dry_run: bool = True, limit: int = 3):
                 f"Статус Ozon: {status}"
             )
             print("  " + msg.replace("\n", "\n  "))
-            send_telegram_message(msg)
+            try:
+                send_telegram_message(msg)
+            except Exception as e:
+                print(f"  Не удалось отправить сообщение в Telegram: {e!r}")
             continue
 
         # --- Формируем тело заказа МойСклад ---
