@@ -47,18 +47,68 @@ def get_stock_all(limit: int = 100, offset: int = 0) -> dict:
     return r.json()
 
 
+import requests
+import json
+
+# предполагаю, что у тебя уже есть MS_AUTH / HEADERS для МойСклад.
+# Если HEADERS уже определён выше в файле — вторую дефиницию не трогай.
+MS_BASE_URL = "https://api.moysklad.ru/api/remap/1.2"
+# HEADERS = {...}  # уже должен быть у тебя в ms_client.py
+
+
+def _ms_get(url: str, params: dict | None = None) -> dict:
+    r = requests.get(url, headers=HEADERS, params=params, timeout=30)
+    print(f"Запрос к МС: {r.url}")
+    print("Статус:", r.status_code)
+    if r.status_code >= 400:
+        print("Ответ МС:", r.text[:2000])
+    r.raise_for_status()
+    return r.json()
+
+
 def find_product_by_article(article: str) -> dict | None:
     """
-    Поиск товара в МойСклад по артикулу.
-    Возвращает первую найденную запись или None.
+    Пытается найти товар в МойСклад по артикулу / коду / имени.
+    Сначала article, потом code, потом name.
+    Возвращает первый найденный product или None.
     """
-    url = f"{BASE_URL}/entity/product"
-    params = {"filter": f"article={article}", "limit": 1}
-    r = requests.get(url, headers=HEADERS, params=params)
-    r.raise_for_status()
-    data = r.json()
-    rows = data.get("rows", [])
-    return rows[0] if rows else None
+    base_url = f"{MS_BASE_URL}/entity/product"
+
+    # 1. Ищем по article
+    try:
+        params = {"filter": f"article={article}"}
+        data = _ms_get(base_url, params=params)
+        rows = data.get("rows", [])
+        if rows:
+            print(f"Найден товар в МС по article={article}")
+            return rows[0]
+    except Exception as e:
+        print(f"Ошибка поиска по article={article}: {e!r}")
+
+    # 2. Ищем по code
+    try:
+        params = {"filter": f"code={article}"}
+        data = _ms_get(base_url, params=params)
+        rows = data.get("rows", [])
+        if rows:
+            print(f"Найден товар в МС по code={article}")
+            return rows[0]
+    except Exception as e:
+        print(f"Ошибка поиска по code={article}: {e!r}")
+
+    # 3. Ищем по name (полное совпадение имени)
+    try:
+        params = {"filter": f"name={article}"}
+        data = _ms_get(base_url, params=params)
+        rows = data.get("rows", [])
+        if rows:
+            print(f"Найден товар в МС по name={article}")
+            return rows[0]
+    except Exception as e:
+        print(f"Ошибка поиска по name={article}: {e!r}")
+
+    print(f"Товар в МойСклад не найден ни по article/code/name = {article}")
+    return None
 
 
 def create_customer_order(payload: dict) -> dict:
