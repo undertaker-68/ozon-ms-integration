@@ -66,62 +66,38 @@ def _ms_get(url: str, params: dict | None = None) -> dict:
     return r.json()
 
 
-def find_product_by_article(article: str) -> dict | None:
-    """
-    Ищет товар в МойСклад по артикулу из Ozon.
+# Нормализация артикула: убираем пробелы по краям, приводим к верхнему регистру
+# и заменяем визуально одинаковые русские буквы на латиницу.
+def _normalize_article(s: str | None) -> str:
+    if not s:
+        return ""
+    s = s.strip()
 
-    ВАЖНО:
-    - Код (code) не используем вообще.
-    - Берём только товары, где article в МойСклад строго совпадает с article из Ozon.
-    """
+    # Русские → латинские (визуально одинаковые)
+    repl_map = {
+        "А": "A", "а": "a",
+        "В": "B", "в": "b",
+        "С": "C", "с": "c",
+        "Е": "E", "е": "e",
+        "К": "K", "к": "k",
+        "М": "M", "м": "m",
+        "Н": "H", "н": "h",
+        "О": "O", "о": "o",
+        "Р": "P", "р": "p",
+        "Т": "T", "т": "t",
+        "Х": "X", "х": "x",
+    }
 
-    base_url = f"{MS_BASE_URL}/entity/product"
+    s_norm = []
+    for ch in s:
+        s_norm.append(repl_map.get(ch, ch))
 
-    # 1. Точный поиск по article через фильтр
-    try:
-        params = {"filter": f"article={article}"}
-        data = _ms_get(base_url, params=params)
-        rows = data.get("rows", [])
-        if rows:
-            print(f"Найден товар в МС по article={article}")
-            return rows[0]
-        else:
-            print(f"МС: filter article={article} вернул 0 товаров")
-    except Exception as e:
-        print(f"Ошибка поиска по article={article}: {e!r}")
+    # сравнение проще делать в верхнем регистре
+    return "".join(s_norm).upper()
 
-    # 2. Поиск через search, но выбираем только те, где article == нашему article
-    try:
-        params = {"search": article}
-        data = _ms_get(base_url, params=params)
-        rows = data.get("rows", [])
-        if rows:
-            # отфильтруем только точное совпадение article
-            exact_matches = [
-                r for r in rows
-                if (r.get("article") or "").strip() == article.strip()
-            ]
-            if exact_matches:
-                r0 = exact_matches[0]
-                print(
-                    f"Найден товар в МС по search={article} с точным совпадением article: "
-                    f"{r0.get('name')} (article={r0.get('article')})"
-                )
-                return r0
-            else:
-                print(
-                    f"МС: search={article} вернул товары, но ни у одного article не совпадает с {article}"
-                )
-        else:
-            print(f"МС: search={article} вернул 0 товаров")
-    except Exception as e:
-        print(f"Ошибка поиска в МС по search={article}: {e!r}")
 
-    # 3. (опционально) можно ещё попробовать совпадение по name, но только если оно == article,
-    #    чтобы не ловить лишние совпадения. Пока пропустим, чтобы не цеплять «почти похожие» товары.
-
-    print(f"Товар в МойСклад не найден ни по article, ни по search с точным article = {article}")
-    return None
+def _articles_equal(a: str | None, b: str | None) -> bool:
+    return _normalize_article(a) == _normalize_article(b)
 
 
 def create_customer_order(payload: dict) -> dict:
