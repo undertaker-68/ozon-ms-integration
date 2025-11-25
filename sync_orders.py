@@ -9,6 +9,7 @@ from ms_client import (
     update_customer_order_state,
     clear_reserve_for_order,
     create_demand_from_order,
+    get_stock_by_article,
 )
 from notifier import send_telegram_message
 
@@ -16,18 +17,29 @@ load_dotenv()
 
 DRY_RUN_ORDERS = os.getenv("DRY_RUN_ORDERS", "true").lower() == "true"
 
-# meta.href нужных статусов заказа в МойСклад
+# Статусы заказа в МС (meta.href)
 MS_STATE_AWAIT_PACK = os.getenv("MS_STATE_AWAIT_PACK")      # Ожидают сборки
 MS_STATE_AWAIT_SHIP = os.getenv("MS_STATE_AWAIT_SHIP")      # Ожидают отгрузки
 MS_STATE_DELIVERING = os.getenv("MS_STATE_DELIVERING")      # Доставляются
 MS_STATE_DELIVERED = os.getenv("MS_STATE_DELIVERED")        # Доставлен
-MS_STATE_CANCELLED = os.getenv("MS_STATE_CANCELLED")        # Отменён/Закрыт
+MS_STATE_CANCELLED = os.getenv("MS_STATE_CANCELLED")        # Отменён/закрыт
+
+# Организация, контрагент и склад — через .env, чтобы не ловить 404 по чужим ID
+MS_ORGANIZATION_HREF = os.getenv("MS_ORGANIZATION_HREF")
+MS_AGENT_HREF = os.getenv("MS_AGENT_HREF")
+MS_STORE_HREF = os.getenv("MS_STORE_HREF")
+
+if not (MS_ORGANIZATION_HREF and MS_AGENT_HREF and MS_STORE_HREF):
+    raise RuntimeError(
+        "Не заданы MS_ORGANIZATION_HREF / MS_AGENT_HREF / MS_STORE_HREF в .env. "
+        "Скопируй их из meta.href существующего заказа/организации/контрагента/склада в МойСклад."
+    )
 
 
 def build_ms_positions_from_posting(posting: dict) -> list[dict]:
     """
     Для одного отправления Ozon строим список позиций МС:
-    [{'quantity': X, 'ms_meta': {...}}, ...]
+    [{'quantity': X, 'ms_meta': {...}, 'article': '...'}, ...]
     Если хотя бы один товар не найден — возвращаем пустой список.
     """
     products = posting.get("products") or []
@@ -49,6 +61,7 @@ def build_ms_positions_from_posting(posting: dict) -> list[dict]:
             {
                 "quantity": qty,
                 "ms_meta": ms_product["meta"],
+                "article": offer_id,
             }
         )
 
@@ -76,21 +89,21 @@ def build_customer_order_payload(posting: dict, ms_positions: list) -> dict:
         "description": "Заказ из Ozon (создан скриптом интеграции)",
         "organization": {
             "meta": {
-                "href": "https://api.moysklad.ru/api/remap/1.2/entity/organization/4116ceb4-6f3d-11eb-0a80-007800235ec3",
+                "href": MS_ORGANIZATION_HREF,
                 "type": "organization",
                 "mediaType": "application/json",
             }
         },
         "agent": {
             "meta": {
-                "href": "https://api.moysklad.ru/api/remap/1.2/entity/counterparty/f61bfcf9-2d74-11ec-0a80-04c700041e03",
+                "href": MS_AGENT_HREF,
                 "type": "counterparty",
                 "mediaType": "application/json",
             }
         },
         "store": {
             "meta": {
-                "href": "https://api.moysklad.ru/api/remap/1.2/entity/store/03ade8fe-c762-11f0-0a80-19c80015d83e",
+                "href": MS_STORE_HREF,
                 "type": "store",
                 "mediaType": "application/json",
             }
@@ -108,6 +121,46 @@ def build_customer_order_payload(posting: dict, ms_positions: list) -> dict:
         )
 
     return payload
+
+
+def notify_zero_stock_if_changed(posting: dict, ms_positions: list, stocks_before: dict[str, int | None]) -> None:
+    """
+    После обработки отправления (обычно статус delivering) проверяем:
+    если у какого-то артикула остаток в МС был >0, а стал 0 — шлём уведомление.
+    """
+    posting_number = posting.get("posting_number")
+    changed = []
+
+    for pos in ms_positions:
+        article = pos.get("article")
+        if not article:
+            continue
+
+        before = stocks_before.get(article)
+        after = get_stock_by_article(article)
+        try:
+            b = int(before) if before is not None else None
+            a = int(after) if after is not None else None
+        except (TypeError, ValueError):
+            continue
+
+        if b is not None and b > 0 and a == 0:
+            changed.append((article, b, a))
+
+    if not changed:
+        return
+
+    lines = [f"Отправление: {posting_number}"]
+    for article, b, a in changed:
+        lines.append(f"Артикул: {article} | было: {b} | стало: {a}")
+
+    text = "ℹ️ В МойСклад остаток товара стал 0 после обработки заказа из Ozon.\n" + "\n".join(lines)
+
+    print("[ORDERS]", text.replace("\n", " | "))
+    try:
+        send_telegram_message(text)
+    except Exception as e:
+        print(f"[ORDERS] Не удалось отправить Telegram: {e!r}")
 
 
 def process_posting(posting: dict, dry_run: bool) -> None:
@@ -144,8 +197,9 @@ def process_posting(posting: dict, dry_run: bool) -> None:
     elif status == "awaiting_deliver":
         # Заказ уже должен существовать, переводим в "Ожидают отгрузки"
         if not existing_order:
-            print(f"[ORDERS] {order_name}: заказ не найден в МС, создать можно при необходимости.")
+            print(f"[ORDERS] {order_name}: заказ не найден в МС, создаём.")
             if dry_run:
+                print("[ORDERS] DRY_RUN_ORDERS=TRUE: создание заказа пропущено.")
                 return
             order_payload = build_customer_order_payload(posting, ms_positions)
             created = create_customer_order(order_payload)
@@ -162,6 +216,13 @@ def process_posting(posting: dict, dry_run: bool) -> None:
 
     elif status == "delivering":
         # Заказ в доставке: статус "Доставляются", снять резерв, создать Отгрузку
+        # и проверить, не ушёл ли остаток в 0
+        # Собираем статьи для проверки остатков
+        articles = {pos.get("article") for pos in ms_positions if pos.get("article")}
+        stocks_before: dict[str, int | None] = {}
+        for art in articles:
+            stocks_before[art] = get_stock_by_article(art)
+
         if not existing_order:
             print(f"[ORDERS] {order_name}: заказ не найден, создаём перед отгрузкой.")
             if dry_run:
@@ -181,7 +242,10 @@ def process_posting(posting: dict, dry_run: bool) -> None:
             update_customer_order_state(href, MS_STATE_DELIVERING)
         clear_reserve_for_order(href)
         create_demand_from_order(href)
-        print(f"[ORDERS] За {order_name}: резерв снят, отгрузка создана.")
+
+        # Теперь проверяем, не стало ли где-то 0
+        notify_zero_stock_if_changed(posting, ms_positions, stocks_before)
+        print(f"[ORDERS] Заказ {order_name}: резерв снят, отгрузка создана.")
 
     elif status == "cancelled":
         # Отмена: по желанию можно снять резерв и поставить статус "Отменён"
