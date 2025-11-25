@@ -68,31 +68,16 @@ def _ms_get(url: str, params: dict | None = None) -> dict:
 
 def find_product_by_article(article: str) -> dict | None:
     """
-    Пытается найти товар в МойСклад по артикулу из Ozon.
+    Ищет товар в МойСклад по артикулу из Ozon.
 
-    Логика:
-    1) Сначала делаем /entity/product?search=<article>  (частичный поиск по всем полям).
-       Если находит — берём первый товар.
-    2) Если ничего не нашлось — пробуем точные фильтры:
-       article=..., code=..., name=...
+    ВАЖНО:
+    - Код (code) не используем вообще.
+    - Берём только товары, где article в МойСклад строго совпадает с article из Ozon.
     """
 
     base_url = f"{MS_BASE_URL}/entity/product"
 
-    # 0. Универсальный search
-    try:
-        params = {"search": article}
-        data = _ms_get(base_url, params=params)
-        rows = data.get("rows", [])
-        if rows:
-            print(f"Найден товар в МС по search={article}: {rows[0].get('name')} (article={rows[0].get('article')}, code={rows[0].get('code')})")
-            return rows[0]
-        else:
-            print(f"МС: search={article} вернул 0 товаров")
-    except Exception as e:
-        print(f"Ошибка поиска в МС по search={article}: {e!r}")
-
-    # 1. Точный article
+    # 1. Точный поиск по article через фильтр
     try:
         params = {"filter": f"article={article}"}
         data = _ms_get(base_url, params=params)
@@ -100,32 +85,42 @@ def find_product_by_article(article: str) -> dict | None:
         if rows:
             print(f"Найден товар в МС по article={article}")
             return rows[0]
+        else:
+            print(f"МС: filter article={article} вернул 0 товаров")
     except Exception as e:
         print(f"Ошибка поиска по article={article}: {e!r}")
 
-    # 2. Точный code
+    # 2. Поиск через search, но выбираем только те, где article == нашему article
     try:
-        params = {"filter": f"code={article}"}
+        params = {"search": article}
         data = _ms_get(base_url, params=params)
         rows = data.get("rows", [])
         if rows:
-            print(f"Найден товар в МС по code={article}")
-            return rows[0]
+            # отфильтруем только точное совпадение article
+            exact_matches = [
+                r for r in rows
+                if (r.get("article") or "").strip() == article.strip()
+            ]
+            if exact_matches:
+                r0 = exact_matches[0]
+                print(
+                    f"Найден товар в МС по search={article} с точным совпадением article: "
+                    f"{r0.get('name')} (article={r0.get('article')})"
+                )
+                return r0
+            else:
+                print(
+                    f"МС: search={article} вернул товары, но ни у одного article не совпадает с {article}"
+                )
+        else:
+            print(f"МС: search={article} вернул 0 товаров")
     except Exception as e:
-        print(f"Ошибка поиска по code={article}: {e!r}")
+        print(f"Ошибка поиска в МС по search={article}: {e!r}")
 
-    # 3. Точный name
-    try:
-        params = {"filter": f"name={article}"}
-        data = _ms_get(base_url, params=params)
-        rows = data.get("rows", [])
-        if rows:
-            print(f"Найден товар в МС по name={article}")
-            return rows[0]
-    except Exception as e:
-        print(f"Ошибка поиска по name={article}: {e!r}")
+    # 3. (опционально) можно ещё попробовать совпадение по name, но только если оно == article,
+    #    чтобы не ловить лишние совпадения. Пока пропустим, чтобы не цеплять «почти похожие» товары.
 
-    print(f"Товар в МойСклад не найден ни по search/article/code/name = {article}")
+    print(f"Товар в МойСклад не найден ни по article, ни по search с точным article = {article}")
     return None
 
 
