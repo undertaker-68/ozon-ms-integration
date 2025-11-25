@@ -226,13 +226,25 @@ def find_customer_order_by_name(name: str) -> dict | None:
 def update_customer_order_state(order_meta_href: str, state_meta_href: str) -> dict:
     """
     Смена статуса заказа покупателя.
+    В meta для state ОБЯЗАТЕЛЕН type="state".
     """
+    # Получаем текущий заказ
     r = requests.get(order_meta_href, headers=HEADERS, timeout=30)
+    if r.status_code >= 400:
+        print(f"[MS ERROR] get order before state change status={r.status_code} body={r.text[:500]}")
     r.raise_for_status()
     order = r.json()
 
-    order["state"] = {"meta": {"href": state_meta_href}}
+    # Обновляем поле state с корректной meta
+    order["state"] = {
+        "meta": {
+            "href": state_meta_href,
+            "type": "state",
+            "mediaType": "application/json",
+        }
+    }
 
+    # Сохраняем заказ
     r_put = requests.put(order_meta_href, headers=HEADERS, json=order, timeout=30)
     if r_put.status_code >= 400:
         print(f"[MS ERROR] update_customer_order_state status={r_put.status_code} body={r_put.text[:500]}")
