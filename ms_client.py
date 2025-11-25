@@ -1,8 +1,8 @@
 import base64
 import os
+import json
 import requests
 from dotenv import load_dotenv
-import json
 
 load_dotenv()
 
@@ -22,6 +22,20 @@ HEADERS = {
 }
 
 BASE_URL = "https://api.moysklad.ru/api/remap/1.2"
+MS_BASE_URL = BASE_URL
+
+
+def _ms_get(url: str, params: dict | None = None) -> dict:
+    """
+    Вспомогательный GET-запрос к МойСклад с логированием.
+    """
+    r = requests.get(url, headers=HEADERS, params=params, timeout=30)
+    print(f"Запрос к МС: {r.url}")
+    print("Статус:", r.status_code)
+    if r.status_code >= 400:
+        print("Ответ МС:", r.text[:2000])
+    r.raise_for_status()
+    return r.json()
 
 
 def get_products(limit: int = 10, offset: int = 0) -> dict:
@@ -47,33 +61,24 @@ def get_stock_all(limit: int = 100, offset: int = 0) -> dict:
     return r.json()
 
 
-import requests
-import json
+# ==========================
+# НОРМАЛИЗАЦИЯ АРТИКУЛА
+# ==========================
 
-# предполагаю, что у тебя уже есть MS_AUTH / HEADERS для МойСклад.
-# Если HEADERS уже определён выше в файле — вторую дефиницию не трогай.
-MS_BASE_URL = "https://api.moysklad.ru/api/remap/1.2"
-# HEADERS = {...}  # уже должен быть у тебя в ms_client.py
-
-
-def _ms_get(url: str, params: dict | None = None) -> dict:
-    r = requests.get(url, headers=HEADERS, params=params, timeout=30)
-    print(f"Запрос к МС: {r.url}")
-    print("Статус:", r.status_code)
-    if r.status_code >= 400:
-        print("Ответ МС:", r.text[:2000])
-    r.raise_for_status()
-    return r.json()
-
-
-# Нормализация артикула: убираем пробелы по краям, приводим к верхнему регистру
-# и заменяем визуально одинаковые русские буквы на латиницу.
 def _normalize_article(s: str | None) -> str:
+    """
+    Нормализация артикула:
+      - убираем пробелы по краям;
+      - заменяем визуально одинаковые русские буквы на латиницу;
+      - приводим к верхнему регистру.
+
+    Это позволяет сравнивать 'E90' и 'Е90' как одно и то же.
+    """
     if not s:
         return ""
     s = s.strip()
 
-    # Русские → латинские (визуально одинаковые)
+    # Русские → латинские (визуально похожие)
     repl_map = {
         "А": "A", "а": "a",
         "В": "B", "в": "b",
@@ -92,16 +97,128 @@ def _normalize_article(s: str | None) -> str:
     for ch in s:
         s_norm.append(repl_map.get(ch, ch))
 
-    # сравнение проще делать в верхнем регистре
     return "".join(s_norm).upper()
 
 
 def _articles_equal(a: str | None, b: str | None) -> bool:
+    """
+    Сравнение артикулов с учётом нормализации.
+    """
     return _normalize_article(a) == _normalize_article(b)
 
 
+# ==========================
+# ПОИСК ПО product / bundle
+# ==========================
+
+def _find_in_entity_by_article(entity_url: str, article: str) -> dict | None:
+    """
+    Пытается найти товар в указанной сущности (product или bundle)
+    по артикулу article.
+
+    Логика:
+      1) /entity/... ?filter=article=...
+         -> берем только те, у кого article совпадает после нормализации.
+      2) /entity/... ?search=...
+         -> также фильтруем по article (с нормализацией).
+    Учитываем ТОЛЬКО поле article, code намеренно игнорируем.
+    """
+    target = article
+
+    # 1. Точный фильтр по article
+    try:
+        params = {"filter": f"article={target}"}
+        data = _ms_get(entity_url, params=params)
+        rows = data.get("rows", [])
+        if rows:
+            exact = [
+                r for r in rows
+                if _articles_equal(r.get("article"), target)
+            ]
+            if exact:
+                r0 = exact[0]
+                print(
+                    f"Найден в {entity_url} по filter article={target}: "
+                    f"{r0.get('name')} (article={r0.get('article')})"
+                )
+                return r0
+            else:
+                print(
+                    f"{entity_url}: filter article={target} вернул товары, "
+                    f"но article не совпал после нормализации"
+                )
+        else:
+            print(f"{entity_url}: filter article={target} вернул 0 товаров")
+    except Exception as e:
+        print(f"Ошибка поиска в {entity_url} по filter article={target}: {e!r}")
+
+    # 2. Поиск через search
+    try:
+        params = {"search": target}
+        data = _ms_get(entity_url, params=params)
+        rows = data.get("rows", [])
+        if rows:
+            exact = [
+                r for r in rows
+                if _articles_equal(r.get("article"), target)
+            ]
+            if exact:
+                r0 = exact[0]
+                print(
+                    f"Найден в {entity_url} по search={target} с точным article: "
+                    f"{r0.get('name')} (article={r0.get('article')})"
+                )
+                return r0
+            else:
+                print(
+                    f"{entity_url}: search={target} вернул товары, но article не совпал "
+                    f"после нормализации с {target}"
+                )
+        else:
+            print(f"{entity_url}: search={target} вернул 0 товаров")
+    except Exception as e:
+        print(f"Ошибка поиска в {entity_url} по search={target}: {e!r}")
+
+    return None
+
+
+def find_product_by_article(article: str) -> dict | None:
+    """
+    Ищет ассортименты в МойСклад по артикулу из Ozon.
+
+    ВАЖНО:
+      - Ищем сначала среди обычных товаров (/entity/product),
+        потом среди комплектов (/entity/bundle).
+      - Учитываем ТОЛЬКО поле article.
+      - Сравниваем артикулы с нормализацией раскладки (E/Е, С/С и т.д.).
+      - code намеренно игнорируем.
+    """
+    product_url = f"{MS_BASE_URL}/entity/product"
+    bundle_url = f"{MS_BASE_URL}/entity/bundle"
+
+    # 1. Обычные товары
+    product = _find_in_entity_by_article(product_url, article)
+    if product is not None:
+        return product
+
+    # 2. Комплекты (bundle)
+    bundle = _find_in_entity_by_article(bundle_url, article)
+    if bundle is not None:
+        return bundle
+
+    print(
+        f"Товар/комплект в МойСклад не найден ни в product, ни в bundle "
+        f"по article={article} (с учётом нормализации)"
+    )
+    return None
+
+
+# ==========================
+# ЗАКАЗЫ ПОКУПАТЕЛЯ (customerorder)
+# ==========================
+
 def create_customer_order(payload: dict) -> dict:
-    url = "https://api.moysklad.ru/api/remap/1.2/entity/customerorder"
+    url = f"{BASE_URL}/entity/customerorder"
     print("=== Запрос в МойСклад /entity/customerorder ===")
     print("URL:", url)
     print("Тело запроса (фрагмент):")
@@ -140,7 +257,7 @@ def update_customer_order_state(order_meta_href: str, state_meta_href: str) -> d
     """
     Смена статуса (state) заказа покупателя.
     order_meta_href — meta.href самого заказа (из поля meta заказа).
-    state_meta_href — meta.href нужного статуса (надо будет взять из /metadata).
+    state_meta_href — meta.href нужного статуса (надо взять из /metadata).
     """
     r = requests.get(order_meta_href, headers=HEADERS)
     r.raise_for_status()
@@ -207,6 +324,7 @@ def create_demand_from_order(order_meta_href: str) -> dict:
     r_post = requests.post(url, headers=HEADERS, json=demand_payload)
     r_post.raise_for_status()
     return r_post.json()
+
 
 if __name__ == "__main__":
     print("=== Тест товаров ===")
