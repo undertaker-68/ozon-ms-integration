@@ -82,84 +82,124 @@ def get_products_state_by_offer_ids(offer_ids):
 
 def update_stocks(stocks: list) -> dict:
     """
-    Обновление остатков в Ozon через /v2/products/stocks.
+    Обновление остатков в Ozon.
+
+    Принимает список словарей вида:
+    {
+        "offer_id": "ART123",
+        "stock": 10,
+        "warehouse_id": 22254230484000
+    }
+
+    Ozon ограничивает размер массива stocks: 1..100 элементов.
+    Поэтому отправляем батчами по 100.
     """
     if not stocks:
-        print("[OZON] Пустой список stocks, запрос не отправляем.")
+        print("update_stocks: передан пустой список stocks, запрос к Ozon не отправляется.")
         return {"result": []}
 
     url = f"{OZON_API_URL}/v2/products/stocks"
-    body = {"stocks": stocks}
+    BATCH_SIZE = 100
+
+    all_results = []
+    any_errors = False
 
     print(f"[OZON] Обновление остатков, позиций: {len(stocks)}")
 
-    try:
-        r = requests.post(url, json=body, headers=HEADERS, timeout=30)
-    except Exception as e:
-        msg = f"❗ Ошибка запроса к Ozon /v2/products/stocks: {e!r}"
-        print(msg)
+    for i in range(0, len(stocks), BATCH_SIZE):
+        batch = stocks[i:i + BATCH_SIZE]
+        body = {"stocks": batch}
+        batch_num = i // BATCH_SIZE + 1
+        total_batches = (len(stocks) + BATCH_SIZE - 1) // BATCH_SIZE
+
+        print(f"[OZON] Отправка батча {batch_num}/{total_batches}, позиций: {len(batch)}")
+        print("=== Тело запроса к Ozon /v2/products/stocks ===")
+        print(json.dumps(body, ensure_ascii=False, indent=2))
+        print("=== /Тело запроса ===\n")
+
         try:
-            send_telegram_message(msg)
-        except Exception:
-            pass
-        raise
-
-    if r.status_code != 200:
-        text_fragment = r.text[:500]
-        msg = (
-            "❗ Ozon вернул ошибку при обновлении остатков\n"
-            f"HTTP status: {r.status_code}\n"
-            f"Response: {text_fragment}"
-        )
-        print(msg)
-        try:
-            send_telegram_message(msg)
-        except Exception:
-            pass
-        r.raise_for_status()
-
-    try:
-        data = r.json()
-    except Exception:
-        text_fragment = r.text[:500]
-        msg = (
-            "❗ Ozon /v2/products/stocks вернул не-JSON ответ\n"
-            f"HTTP status: {r.status_code}\n"
-            f"Response: {text_fragment}"
-        )
-        print(msg)
-        try:
-            send_telegram_message(msg)
-        except Exception:
-            pass
-        raise RuntimeError("Некорректный JSON от Ozon при обновлении остатков")
-
-    result_items = data.get("result", [])
-    errors_summary = []
-
-    for item in result_items:
-        offer_id = item.get("offer_id")
-        errors = item.get("errors") or []
-        for err in errors:
-            code = err.get("code")
-            message = err.get("message")
-            msg = (
-                "❗ Ошибка обновления остатка в Ozon по товару\n"
-                f"offer_id: {offer_id}\n"
-                f"code: {code}\n"
-                f"message: {message}"
-            )
+            r = requests.post(url, json=body, headers=HEADERS, timeout=30)
+        except Exception as e:
+            msg = f"❗ Ошибка запроса к Ozon /v2/products/stocks (батч {batch_num}/{total_batches}):\n{e!r}"
             print(msg)
-            errors_summary.append(msg)
+            try:
+                send_telegram_message(msg)
+            except Exception:
+                pass
+            raise
 
-    if errors_summary:
+        print("=== Ответ Ozon /v2/products/stocks ===")
+        print("HTTP status:", r.status_code)
+        text_fragment = r.text[:2000]
+        print(text_fragment)
+        print("=== /Ответ Ozon ===\n")
+
+        if r.status_code != 200:
+            any_errors = True
+            msg = (
+                "❗ Ozon вернул ошибку при обновлении остатков\n"
+                f"Батч: {batch_num}/{total_batches}\n"
+                f"HTTP status: {r.status_code}\n"
+                f"Response: {text_fragment}"
+            )
+            try:
+                send_telegram_message(msg)
+            except Exception:
+                pass
+            r.raise_for_status()
+
         try:
-            send_telegram_message("⚠ Ошибки при обновлении остатков в Ozon:\n\n" + "\n\n".join(errors_summary))
+            data = r.json()
         except Exception:
-            pass
+            any_errors = True
+            msg = (
+                "❗ Ozon /v2/products/stocks вернул не-JSON ответ\n"
+                f"Батч: {batch_num}/{total_batches}\n"
+                f"HTTP status: {r.status_code}\n"
+                f"Response: {text_fragment}"
+            )
+            try:
+                send_telegram_message(msg)
+            except Exception:
+                pass
+            raise RuntimeError("Некорректный JSON от Ozon при обновлении остатков")
 
-    print("[OZON] Обновление остатков завершено, ошибок:", len(errors_summary))
-    return data
+        result_items = data.get("result", [])
+        all_results.extend(result_items)
+
+        errors_summary = []
+        for item in result_items:
+            offer_id = item.get("offer_id")
+            errors = item.get("errors") or []
+            if errors:
+                any_errors = True
+                for err in errors:
+                    code = err.get("code")
+                    message = err.get("message")
+                    msg = (
+                        "❗ Ошибка обновления остатка в Ozon по товару\n"
+                        f"offer_id: {offer_id}\n"
+                        f"code: {code}\n"
+                        f"message: {message}"
+                    )
+                    print(msg)
+                    errors_summary.append(msg)
+
+        if errors_summary:
+            try:
+                send_telegram_message(
+                    "⚠ Ошибки при обновлении остатков в Ozon "
+                    f"(батч {batch_num}/{total_batches}):\n\n" + "\n\n".join(errors_summary)
+                )
+            except Exception:
+                pass
+
+    if not any_errors:
+        print(f"[OZON] Обновление остатков завершено, ошибок нет. Всего позиций: {len(all_results)}")
+    else:
+        print("[OZON] Обновление остатков завершено с ошибками, подробности выше/в Telegram.")
+
+    return {"result": all_results}
 
 
 def get_fbs_postings(limit: int = 3) -> dict:
