@@ -53,10 +53,15 @@ def get_products(limit: int = 10, offset: int = 0) -> dict:
 def get_stock_all(limit: int = 100, offset: int = 0) -> dict:
     """
     Отчет по остаткам: /report/stock/all
+    Берём остатки ТОЛЬКО по складу MS_OZON_STORE_ID (через параметр stockStore).
     Возвращает словарь, в котором нас интересует ключ 'rows'.
     """
     url = f"{BASE_URL}/report/stock/all"
-    params = {"limit": limit, "offset": offset}
+    params = {
+        "limit": limit,
+        "offset": offset,
+        "stockStore": MS_OZON_STORE_HREF,
+    }
     r = requests.get(url, headers=HEADERS, params=params, timeout=30)
     r.raise_for_status()
     return r.json()
