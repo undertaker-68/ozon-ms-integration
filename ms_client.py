@@ -56,6 +56,25 @@ def get_stock_all(limit: int = 100, offset: int = 0) -> dict:
     return r.json()
 
 
+def get_stock_by_article(article: str) -> int | None:
+    """
+    Получить текущий остаток товара по артикулу (report/stock/all).
+    Используем для уведомления, когда остаток после обработки заказа стал 0.
+    """
+    url = f"{BASE_URL}/report/stock/all"
+    params = {"filter": f"article={article}", "limit": 1}
+    data = _ms_get(url, params=params)
+    rows = data.get("rows", [])
+    if not rows:
+        return None
+
+    stock = rows[0].get("stock")
+    try:
+        return int(stock)
+    except (TypeError, ValueError):
+        return None
+
+
 # ==========================
 # НОРМАЛИЗАЦИЯ АРТИКУЛА
 # ==========================
