@@ -21,6 +21,12 @@ HEADERS = {
 }
 
 BASE_URL = "https://api.moysklad.ru/api/remap/1.2"
+MS_OZON_STORE_ID = os.getenv("MS_OZON_STORE_ID")
+if not MS_OZON_STORE_ID:
+    raise RuntimeError("Не задан MS_OZON_STORE_ID в .env")
+
+MS_OZON_STORE_HREF = f"{BASE_URL}/entity/store/{MS_OZON_STORE_ID}"
+
 MS_BASE_URL = BASE_URL
 
 
