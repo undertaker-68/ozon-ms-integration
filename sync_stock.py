@@ -11,15 +11,23 @@ except ImportError:
         print("Telegram notifier не доступен:", text)
         return False
 
+
 load_dotenv()
 
 DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
 WAREHOUSE_ID = int(os.getenv("OZON_WAREHOUSE_ID", "0"))
 
+# Игнор-лист артикулов, которые не нужно трогать в Ozon (через запятую)
+# Пример в .env:
+# IGNORE_STOCK_OFFERS=14111,10561.1
+IGNORE_STOCK_OFFERS = set(
+    offer.strip() for offer in os.getenv("IGNORE_STOCK_OFFERS", "").split(",") if offer.strip()
+)
+
 
 def _fetch_ms_stock_rows(limit: int = 1000) -> list[dict]:
     """
-    Тянем все строки отчёта /report/stock/all.
+    Тянем все строки отчёта /report/stock/all из МойСклад.
     """
     rows: list[dict] = []
     offset = 0
@@ -42,8 +50,9 @@ def build_ozon_stocks_from_ms() -> tuple[list[dict], int]:
     Собираем список остатков для отправки в Ozon + считаем,
     сколько товаров было пропущено, потому что Ozon их не знает.
 
-    ВАЖНО: Ozon не принимает отрицательные остатки,
-    поэтому все stock < 0 принудительно превращаем в 0.
+    ВАЖНО:
+      - Ozon не принимает отрицательные остатки, поэтому stock < 0 → 0.
+      - Товары из IGNORE_STOCK_OFFERS полностью пропускаются.
     """
     rows = _fetch_ms_stock_rows(limit=1000)
 
@@ -52,6 +61,11 @@ def build_ozon_stocks_from_ms() -> tuple[list[dict], int]:
         article = row.get("article")
         if not article:
             continue
+
+        if article in IGNORE_STOCK_OFFERS:
+            print(f"[STOCK] ⛔ Пропуск по игнор-листу: {article}")
+            continue
+
         stock = row.get("stock")
         try:
             stock_int = int(stock)
