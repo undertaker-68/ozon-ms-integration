@@ -23,9 +23,6 @@ def build_ozon_stocks_from_ms(limit: int = 100) -> list[dict]:
     """
     Берём первые `limit` строк отчёта по остаткам из МойСклад
     и превращаем их в список словарей для Ozon.
-
-    Ожидается, что get_stock_all возвращает dict с ключом "rows".
-    Каждая row — dict с полями "article" и "stock".
     """
     ms_data = get_stock_all(limit=limit, offset=0)
     rows = ms_data.get("rows", [])
@@ -34,10 +31,9 @@ def build_ozon_stocks_from_ms(limit: int = 100) -> list[dict]:
 
     for row in rows:
         article = row.get("article")
-        stock_value = row.get("stock")  # доступный остаток
+        stock_value = row.get("stock")
 
         if not article:
-            # если у товара нет артикула - пропускаем
             continue
 
         try:
@@ -50,8 +46,8 @@ def build_ozon_stocks_from_ms(limit: int = 100) -> list[dict]:
 
         stocks.append(
             {
-                "offer_id": article,       # артикул = offer_id в Ozon
-                "stock": stock_int,        # количество
+                "offer_id": article,
+                "stock": stock_int,
                 "warehouse_id": WAREHOUSE_ID,
             }
         )
@@ -60,25 +56,16 @@ def build_ozon_stocks_from_ms(limit: int = 100) -> list[dict]:
 
 
 def main(dry_run: bool | None = None, limit: int = 100) -> None:
-    """
-    dry_run:
-      - True  -> только печатаем, что отправили бы в Ozon.
-      - False -> реально отправляем запрос в Ozon.
-      - None  -> берём значение из переменной окружения DRY_RUN.
-    """
     if dry_run is None:
         dry_run = DRY_RUN
 
-    print(f"DRY_RUN = {dry_run}")
-    print(f"WAREHOUSE_ID = {WAREHOUSE_ID}")
+    print(f"[STOCK] DRY_RUN={dry_run}, WAREHOUSE_ID={WAREHOUSE_ID}")
 
     stocks = build_ozon_stocks_from_ms(limit=limit)
 
     if not stocks:
-        print("Нет данных по остаткам из МойСклад.")
+        print("[STOCK] Нет данных по остаткам из МойСклад.")
         return
-
-    # --- Фильтрация по состоянию товара на Ozon ---
 
     offer_ids = [s["offer_id"] for s in stocks]
     states = get_products_state_by_offer_ids(offer_ids)
@@ -87,46 +74,37 @@ def main(dry_run: bool | None = None, limit: int = 100) -> None:
     skipped_blocked: list[str] = []
     skipped_unknown: list[str] = []
 
-    BLOCKED_STATES = {"ARCHIVED", "DISABLED"}  # Архив / сняты с продажи
+    BLOCKED_STATES = {"ARCHIVED", "DISABLED"}
 
     for item in stocks:
         oid = item["offer_id"]
         state = states.get(oid)
 
         if state is None:
-            # Ozon не знает такой товар (нет в кабинете)
             skipped_unknown.append(oid)
             continue
 
         state_str = str(state).upper()
-
         if state_str in BLOCKED_STATES:
-            skipped_blocked.append(f"{oid} ({state_str})")
+            skipped_blocked.append(oid)
             continue
 
         active_stocks.append(item)
 
     if skipped_blocked:
-        print("Следующие товары на Ozon ARCHIVED/DISABLED, остатки НЕ отправляем:")
-        for s in skipped_blocked:
-            print("  -", s)
+        print(f"[STOCK] Пропущено (ARCHIVED/DISABLED на Ozon): {len(skipped_blocked)}")
 
     if skipped_unknown:
-        print("Для части offer_id Ozon не вернул данные (товар не найден), они пропущены.")
-        print("Примеры offer_id:", ", ".join(skipped_unknown[:10]))
+        print(f"[STOCK] Пропущено (товар не найден на Ozon): {len(skipped_unknown)}")
 
     stocks = active_stocks
 
     if not stocks:
-        print("После фильтрации по состояниям Ozon не осталось позиций для обновления.")
+        print("[STOCK] После фильтрации по состояниям Ozon позиций не осталось.")
         return
 
-    print(f"Сформировано {len(stocks)} позиций для обновления остатков в Ozon.")
-    print("Пример первых 5 позиций:")
-    for item in stocks[:5]:
-        print(item)
+    print(f"[STOCK] Позиций для отправки в Ozon: {len(stocks)}")
 
-    # --- Телеграм: «товар на складе Ozon закончился» (stock == 0) ---
     zero_items = [s for s in stocks if s.get("stock") == 0]
     for item in zero_items:
         msg = (
@@ -134,21 +112,19 @@ def main(dry_run: bool | None = None, limit: int = 100) -> None:
             f"offer_id: {item['offer_id']}\n"
             "Передаётся остаток 0 из МойСклад."
         )
-        print("Telegram:", msg.replace("\n", " | "))
         try:
             send_telegram_message(msg)
         except Exception as e:
-            print(f"Не удалось отправить сообщение в Telegram: {e!r}")
+            print(f"[STOCK] Не удалось отправить Telegram: {e!r}")
 
     if dry_run:
-        print("\nРежим DRY_RUN=TRUE: данные в Ozon НЕ отправляются.")
+        print("[STOCK] DRY_RUN=TRUE: данные в Ozon не отправляются.")
         return
 
-    # --- Боевой режим ---
-    print("\nОтправка остатков в Ozon...")
+    print("[STOCK] Отправляем остатки в Ozon...")
     resp = update_stocks(stocks)
-    print("Ответ Ozon:")
-    print(resp)
+    updated = sum(1 for r in resp.get("result", []) if r.get("updated"))
+    print(f"[STOCK] Обновлено в Ozon: {updated} позиций")
 
 
 if __name__ == "__main__":
