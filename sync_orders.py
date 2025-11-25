@@ -11,7 +11,13 @@ from ms_client import (
     create_demand_from_order,
     get_stock_by_article,
 )
-from notifier import send_telegram_message
+
+try:
+    from notifier import send_telegram_message
+except ImportError:
+    def send_telegram_message(text: str) -> bool:
+        print("Telegram notifier не доступен:", text)
+        return False
 
 load_dotenv()
 
@@ -24,7 +30,7 @@ MS_STATE_DELIVERING = os.getenv("MS_STATE_DELIVERING")      # Доставляю
 MS_STATE_DELIVERED = os.getenv("MS_STATE_DELIVERED")        # Доставлен
 MS_STATE_CANCELLED = os.getenv("MS_STATE_CANCELLED")        # Отменён/закрыт
 
-# Организация, контрагент и склад — через .env, чтобы не ловить 404 по чужим ID
+# Организация, контрагент и склад — через .env
 MS_ORGANIZATION_HREF = os.getenv("MS_ORGANIZATION_HREF")
 MS_AGENT_HREF = os.getenv("MS_AGENT_HREF")
 MS_STORE_HREF = os.getenv("MS_STORE_HREF")
@@ -82,11 +88,17 @@ def build_ms_positions_from_posting(posting: dict) -> list[dict]:
 
 
 def build_customer_order_payload(posting: dict, ms_positions: list) -> dict:
+    """
+    Формируем заказ покупателя для МойСклад.
+    ИМЯ ЗАКАЗА = номер отправления Ozon (БЕЗ префикса OZON-).
+    description: 'FBS → Auto-Mix'
+    """
     posting_number = posting.get("posting_number", "NO_NUMBER")
+    order_name = posting_number
 
     payload = {
-        "name": f"OZON-{posting_number}",
-        "description": "Заказ из Ozon (создан скриптом интеграции)",
+        "name": order_name,
+        "description": "FBS \u2192 Auto-Mix",
         "organization": {
             "meta": {
                 "href": MS_ORGANIZATION_HREF,
@@ -163,6 +175,25 @@ def notify_zero_stock_if_changed(posting: dict, ms_positions: list, stocks_befor
         print(f"[ORDERS] Не удалось отправить Telegram: {e!r}")
 
 
+def _find_existing_order_by_posting_number(posting_number: str) -> dict | None:
+    """
+    Для плавного перехода:
+      - сначала ищем заказ с именем = posting_number
+      - если нет, ищем старый вариант: OZON-{posting_number}
+    """
+    if not posting_number:
+        return None
+
+    name_new = posting_number
+    name_old = f"OZON-{posting_number}"
+
+    order = find_customer_order_by_name(name_new)
+    if order:
+        return order
+
+    return find_customer_order_by_name(name_old)
+
+
 def process_posting(posting: dict, dry_run: bool) -> None:
     posting_number = posting.get("posting_number")
     status = posting.get("status")
@@ -173,8 +204,8 @@ def process_posting(posting: dict, dry_run: bool) -> None:
         print(f"[ORDERS] Пропускаем {posting_number}: нет ни одной позиции в МС")
         return
 
-    order_name = f"OZON-{posting_number}"
-    existing_order = find_customer_order_by_name(order_name)
+    order_name = posting_number
+    existing_order = _find_existing_order_by_posting_number(posting_number)
 
     if status == "awaiting_packaging":
         # Создать заказ, статус "Ожидают сборки", поставить резерв
@@ -217,7 +248,6 @@ def process_posting(posting: dict, dry_run: bool) -> None:
     elif status == "delivering":
         # Заказ в доставке: статус "Доставляются", снять резерв, создать Отгрузку
         # и проверить, не ушёл ли остаток в 0
-        # Собираем статьи для проверки остатков
         articles = {pos.get("article") for pos in ms_positions if pos.get("article")}
         stocks_before: dict[str, int | None] = {}
         for art in articles:
@@ -243,12 +273,11 @@ def process_posting(posting: dict, dry_run: bool) -> None:
         clear_reserve_for_order(href)
         create_demand_from_order(href)
 
-        # Теперь проверяем, не стало ли где-то 0
         notify_zero_stock_if_changed(posting, ms_positions, stocks_before)
         print(f"[ORDERS] Заказ {order_name}: резерв снят, отгрузка создана.")
 
     elif status == "cancelled":
-        # Отмена: по желанию можно снять резерв и поставить статус "Отменён"
+        # Отмена: снять резерв и поставить статус "Отменён"
         if not existing_order:
             print(f"[ORDERS] {order_name}: нет заказа в МС, нечего отменять.")
             return
