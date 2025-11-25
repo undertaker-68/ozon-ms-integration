@@ -68,13 +68,31 @@ def _ms_get(url: str, params: dict | None = None) -> dict:
 
 def find_product_by_article(article: str) -> dict | None:
     """
-    Пытается найти товар в МойСклад по артикулу / коду / имени.
-    Сначала article, потом code, потом name.
-    Возвращает первый найденный product или None.
+    Пытается найти товар в МойСклад по артикулу из Ozon.
+
+    Логика:
+    1) Сначала делаем /entity/product?search=<article>  (частичный поиск по всем полям).
+       Если находит — берём первый товар.
+    2) Если ничего не нашлось — пробуем точные фильтры:
+       article=..., code=..., name=...
     """
+
     base_url = f"{MS_BASE_URL}/entity/product"
 
-    # 1. Ищем по article
+    # 0. Универсальный search
+    try:
+        params = {"search": article}
+        data = _ms_get(base_url, params=params)
+        rows = data.get("rows", [])
+        if rows:
+            print(f"Найден товар в МС по search={article}: {rows[0].get('name')} (article={rows[0].get('article')}, code={rows[0].get('code')})")
+            return rows[0]
+        else:
+            print(f"МС: search={article} вернул 0 товаров")
+    except Exception as e:
+        print(f"Ошибка поиска в МС по search={article}: {e!r}")
+
+    # 1. Точный article
     try:
         params = {"filter": f"article={article}"}
         data = _ms_get(base_url, params=params)
@@ -85,7 +103,7 @@ def find_product_by_article(article: str) -> dict | None:
     except Exception as e:
         print(f"Ошибка поиска по article={article}: {e!r}")
 
-    # 2. Ищем по code
+    # 2. Точный code
     try:
         params = {"filter": f"code={article}"}
         data = _ms_get(base_url, params=params)
@@ -96,7 +114,7 @@ def find_product_by_article(article: str) -> dict | None:
     except Exception as e:
         print(f"Ошибка поиска по code={article}: {e!r}")
 
-    # 3. Ищем по name (полное совпадение имени)
+    # 3. Точный name
     try:
         params = {"filter": f"name={article}"}
         data = _ms_get(base_url, params=params)
@@ -107,7 +125,7 @@ def find_product_by_article(article: str) -> dict | None:
     except Exception as e:
         print(f"Ошибка поиска по name={article}: {e!r}")
 
-    print(f"Товар в МойСклад не найден ни по article/code/name = {article}")
+    print(f"Товар в МойСклад не найден ни по search/article/code/name = {article}")
     return None
 
 
