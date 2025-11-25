@@ -41,6 +41,9 @@ def build_ozon_stocks_from_ms() -> tuple[list[dict], int]:
     """
     Собираем список остатков для отправки в Ozon + считаем,
     сколько товаров было пропущено, потому что Ozon их не знает.
+
+    ВАЖНО: Ozon не принимает отрицательные остатки,
+    поэтому все stock < 0 принудительно превращаем в 0.
     """
     rows = _fetch_ms_stock_rows(limit=1000)
 
@@ -54,6 +57,11 @@ def build_ozon_stocks_from_ms() -> tuple[list[dict], int]:
             stock_int = int(stock)
         except (TypeError, ValueError):
             stock_int = 0
+
+        if stock_int < 0:
+            print(f"[STOCK] В МС отрицательный остаток, принудительно ставим 0: {article} (raw={stock})")
+            stock_int = 0
+
         candidates.append((article, stock_int))
 
     offer_ids = [art for art, _ in candidates]
