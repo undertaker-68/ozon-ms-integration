@@ -50,18 +50,28 @@ def get_products(limit: int = 10, offset: int = 0) -> dict:
     return r.json()
 
 
-def get_stock_all(limit: int = 100, offset: int = 0) -> dict:
+def get_stock_all(limit: int = 100, offset: int = 0, store_id: str | None = None) -> dict:
     """
     Отчет по остаткам: /report/stock/all
-    Берём остатки ТОЛЬКО по складу MS_OZON_STORE_ID (через параметр stockStore).
-    Возвращает словарь, в котором нас интересует ключ 'rows'.
+    Если передан store_id — берём остатки ТОЛЬКО по этому складу.
+    Если не передан — используем MS_OZON_STORE_ID (для совместимости).
     """
     url = f"{BASE_URL}/report/stock/all"
+
+    if store_id is None:
+        # старое поведение
+        if not MS_OZON_STORE_ID:
+            raise RuntimeError("Не задан MS_OZON_STORE_ID в .env и не передан store_id в get_stock_all")
+        stock_store_href = f"{BASE_URL}/entity/store/{MS_OZON_STORE_ID}"
+    else:
+        stock_store_href = f"{BASE_URL}/entity/store/{store_id}"
+
     params = {
         "limit": limit,
         "offset": offset,
-        "stockStore": MS_OZON_STORE_HREF,
+        "stockStore": stock_store_href,
     }
+
     r = requests.get(url, headers=HEADERS, params=params, timeout=30)
     r.raise_for_status()
     return r.json()
