@@ -111,4 +111,144 @@ def build_ozon_stocks_from_ms() -> tuple[list[dict], int]:
 
     ВАЖНО:
       - Ozon не принимает отрицательные остатки, поэтому stock < 0 → 0.
-      - Товары из IGNORE_STOCK_OFF
+      - Товары из IGNORE_STOCK_OFFERS полностью пропускаются.
+      - Остатки передаются отдельно по каждому складу Ozon (warehouse_id из WAREHOUSE_MAP).
+    """
+    candidates: list[tuple[str, int, int]] = []  # (article, stock, ozon_warehouse_id)
+
+    # 1. Собираем остатки по каждому складу МС, участвующему в интеграции
+    for ms_store_id, ozon_wh_id in WAREHOUSE_MAP.items():
+        print(f"[STOCK] Читаем остатки из МС: store_id={ms_store_id} → Ozon warehouse_id={ozon_wh_id}")
+        rows = _fetch_ms_stock_rows_for_store(ms_store_id, limit=1000)
+
+        for row in rows:
+            article = row.get("article")
+            if not article:
+                continue
+
+            if article in IGNORE_STOCK_OFFERS:
+                print(f"[STOCK] ⛔ Пропуск по игнор-листу: {article}")
+                continue
+
+            stock = row.get("stock")
+            try:
+                stock_int = int(stock)
+            except (TypeError, ValueError):
+                stock_int = 0
+
+            if stock_int < 0:
+                print(f"[STOCK] В МС отрицательный остаток, принудительно ставим 0: {article} (raw={stock})")
+                stock_int = 0
+
+            candidates.append((article, stock_int, ozon_wh_id))
+
+    if not candidates:
+        print("[STOCK] Нет кандидатов для отправки в Ozon (список остатков пуст).")
+        return [], 0
+
+    # 2. Проверяем, какие offer_id вообще существуют в Ozon (по артикулу, без привязки к складу)
+    offer_ids = list({art for art, _, _ in candidates})
+    states = get_products_state_by_offer_ids(offer_ids)
+
+    stocks: list[dict] = []
+    skipped_not_found = 0
+
+    for article, stock, ozon_wh_id in candidates:
+        state = states.get(article)
+
+        # Ozon вообще не знает такой offer_id
+        if state is None:
+            skipped_not_found += 1
+            continue
+
+        # ARCHIVED / autoarchived не трогаем
+        if state != "ACTIVE":
+            continue
+
+        stocks.append(
+            {
+                "offer_id": article,
+                "stock": stock,
+                "warehouse_id": ozon_wh_id,
+            }
+        )
+
+        # Уведомление, что в МС остаток 0 и мы его передаём в Ozon по конкретному складу
+        if stock == 0:
+            text = (
+                "ℹ️ Товар на складе Ozon закончился.\n"
+                f"offer_id: {article}\n"
+                f"Склад Ozon (warehouse_id): {ozon_wh_id}\n"
+                f"Передаётся остаток 0 из МойСклад."
+            )
+            print("[STOCK]", text.replace("\n", " | "))
+            try:
+                send_telegram_message(text)
+            except Exception:
+                pass
+
+    return stocks, skipped_not_found
+
+
+def _send_success_summary_telegram(stocks: list[dict], errors_present: bool) -> None:
+    """
+    Отправляем краткий итог по остаткам:
+      - только если ошибок нет;
+      - формат: 'Интеграция выполнена успешно, ошибок нет' + 'Товар (склад) - количество'.
+    """
+    if errors_present:
+        return
+    if not stocks:
+        return
+
+    lines = []
+    for s in stocks[:20]:
+        lines.append(f"{s['offer_id']} (wh={s['warehouse_id']}) - {s['stock']}")
+
+    if len(stocks) > 20:
+        lines.append(f"... и ещё {len(stocks) - 20} позиций")
+
+    text = "Интеграция выполнена успешно, ошибок нет.\nОбновлены остатки:\n" + "\n".join(lines)
+
+    try:
+        send_telegram_message(text)
+    except Exception as e:
+        print(f"[STOCK] Не удалось отправить Telegram-резюме: {e!r}")
+
+
+def main(dry_run: bool | None = None) -> None:
+    if dry_run is None:
+        dry_run = DRY_RUN
+
+    print(f"[STOCK] DRY_RUN={dry_run}")
+
+    stocks, skipped_not_found = build_ozon_stocks_from_ms()
+    print(f"[STOCK] Пропущено (товар не найден на Ozon): {skipped_not_found}")
+    print(f"[STOCK] Позиций для отправки в Ozon: {len(stocks)}")
+
+    if dry_run:
+        print("[STOCK] DRY_RUN=TRUE: запрос к Ozon не отправляется.")
+        return
+
+    if not stocks:
+        print("[STOCK] Список остатков пуст, обновлять в Ozon нечего.")
+        return
+
+    print("[STOCK] Отправляем остатки в Ozon...")
+
+    data = update_stocks(stocks)
+    result_items = data.get("result", []) if isinstance(data, dict) else []
+    errors_present = any((item.get("errors") or []) for item in result_items)
+
+    if not errors_present:
+        updated_count = len(result_items) if result_items else len(stocks)
+        print(f"[STOCK] Обновлено в Ozon: {updated_count} позиций")
+    else:
+        print("[STOCK] Обновление в Ozon завершено с ошибками (подробности в логах / Telegram).")
+
+    # Итоговое уведомление в Telegram: только если ошибок нет
+    _send_success_summary_telegram(stocks, errors_present)
+
+
+if __name__ == "__main__":
+    main(dry_run=None)
