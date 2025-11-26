@@ -6,8 +6,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-MS_LOGIN = os.getenv("MS_LOGI")
-MS_PASSWORD = os.getenv("MS_PASSWOR")
+MS_LOGIN = os.getenv("MS_LOGIN")
+MS_PASSWORD = os.getenv("MS_PASSWORD")
 
 if not MS_LOGIN or not MS_PASSWORD:
     raise RuntimeError("Не заданы MS_LOGIN / MS_PASSWORD в .env")
