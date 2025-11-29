@@ -270,7 +270,7 @@ def _send_stock_report_file(report_rows: list[dict]) -> None:
     os.close(fd)
 
     try:
-        with open(tmp_path, "w", newline="", encoding="utf-8") as f:
+        with open(tmp_path, "w", newline="", encoding="utf-8-sig") as f:
             writer = csv.writer(f, delimiter=";")
             # Заголовки как ты просил
             writer.writerow(["№ п/п", "Наименование", "Артикул", "Кол-во"])
