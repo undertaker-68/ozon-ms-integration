@@ -75,31 +75,34 @@ def get_products(limit: int = 10, offset: int = 0) -> dict:
     return r.json()
 
 
-def get_stock_all(limit: int = 100, offset: int = 0, store_id: str | None = None) -> dict:
+def get_stock_all(limit: int = 1000, offset: int = 0, store_id: str | None = None) -> dict:
     """
-    Отчет по остаткам: /report/stock/all
-    Если передан store_id — берём остатки ТОЛЬКО по этому складу.
-    Если не передан — используем MS_OZON_STORE_ID (для совместимости).
+    Отчёт /report/stock/all.
+    Если передан store_id — возвращаем остатки только по этому складу.
+
+    store_id можно передать:
+      - как GUID склада (42db7535-...),
+      - или как полный href (https://api.moysklad.ru/.../entity/store/42db7535-...).
     """
     url = f"{BASE_URL}/report/stock/all"
-
-    if store_id is None:
-        # старое поведение
-        if not MS_OZON_STORE_ID:
-            raise RuntimeError("Не задан MS_OZON_STORE_ID в .env и не передан store_id в get_stock_all")
-        stock_store_href = f"{BASE_URL}/entity/store/{MS_OZON_STORE_ID}"
-    else:
-        stock_store_href = f"{BASE_URL}/entity/store/{store_id}"
-
-    params = {
+    params: dict[str, object] = {
         "limit": limit,
         "offset": offset,
-        "stockStore": stock_store_href,
     }
 
-    r = requests.get(url, headers=HEADERS, params=params, timeout=30)
-    r.raise_for_status()
-    return r.json()
+    if store_id:
+        # Если нам дали GUID — собираем href
+        if store_id.startswith("http"):
+            stock_store_href = store_id
+        else:
+            stock_store_href = f"{BASE_URL}/entity/store/{store_id}"
+
+        # ВАЖНО: именно stockStore, а не store.id и т.п.
+        params["stockStore"] = stock_store_href
+
+    resp = session.get(url, params=params, timeout=30)
+    resp.raise_for_status()
+    return resp.json()
 
 
 def get_stock_by_article(article: str) -> int | None:
