@@ -9,7 +9,7 @@ from ms_client import (
     update_customer_order_state,
     clear_reserve_for_order,
     create_demand_from_order,
-    get_stock_by_article,
+    get_stock_by_assortment_href,
 )
 
 try:
