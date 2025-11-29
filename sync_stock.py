@@ -306,8 +306,10 @@ def main(dry_run: bool | None = None) -> None:
     print(f"[STOCK] Пропущено (товар не найден на Ozon): {skipped_not_found}")
     print(f"[STOCK] Позиций для отправки в Ozon: {len(stocks)}")
 
+    # 👉 В РЕЖИМЕ DRY_RUN: в Ozon НЕ идём, но файл всё равно отправляем
     if dry_run:
-        print("[STOCK] DRY_RUN=TRUE: запрос к Ozon не отправляется.")
+        print("[STOCK] DRY_RUN=TRUE: запрос к Ozon не отправляется, но отчётный файл шлём в Telegram.")
+        _send_stock_report_file(report_rows)
         return
 
     if not stocks:
