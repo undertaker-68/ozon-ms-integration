@@ -79,11 +79,17 @@ def get_stock_all(limit: int = 100, offset: int = 0, store_id: str | None = None
 
 def get_stock_by_article(article: str) -> int | None:
     """
-    Получить текущий остаток товара по артикулу (report/stock/all).
-    Используем для уведомления, когда остаток после обработки заказа стал 0.
+    Получить текущий остаток товара по артикулу (report/stock/all)
+    ТОЛЬКО по складу MS_OZON_STORE_ID (через stockStore), чтобы
+    не ловить 412 и не суммировать по всем складам.
     """
     url = f"{BASE_URL}/report/stock/all"
-    params = {"filter": f"article={article}", "limit": 1}
+    params = {
+        "filter": f"article={article}",
+        "limit": 1,
+        "stockStore": MS_OZON_STORE_HREF,  # <–– вот это добавили
+    }
+
     data = _ms_get(url, params=params)
     rows = data.get("rows", [])
     if not rows:
@@ -94,7 +100,6 @@ def get_stock_by_article(article: str) -> int | None:
         return int(stock)
     except (TypeError, ValueError):
         return None
-
 
 # ==========================
 # НОРМАЛИЗАЦИЯ АРТИКУЛА
