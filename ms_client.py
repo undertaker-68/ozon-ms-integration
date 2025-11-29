@@ -41,6 +41,31 @@ def _ms_get(url: str, params: dict | None = None) -> dict:
     r.raise_for_status()
     return r.json()
 
+def get_stock_by_assortment_href(assortment_href: str) -> int | None:
+    """
+    Получить текущий остаток товара по meta.href ассортимента
+    через отчет /report/stock/all.
+
+    Фильтрация по полю assortment (так требует API),
+    и только по складу MS_OZON_STORE_ID (MS_OZON_STORE_HREF).
+    """
+    url = f"{BASE_URL}/report/stock/all"
+    params = {
+        "filter": f"assortment={assortment_href}",
+        "limit": 1,
+        "stockStore": MS_OZON_STORE_HREF,
+    }
+    data = _ms_get(url, params=params)
+    rows = data.get("rows", [])
+    if not rows:
+        return None
+
+    stock = rows[0].get("stock")
+    try:
+        return int(stock)
+    except (TypeError, ValueError):
+        return None
+
 
 def get_products(limit: int = 10, offset: int = 0) -> dict:
     url = f"{BASE_URL}/entity/product"
