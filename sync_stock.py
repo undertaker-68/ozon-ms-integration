@@ -130,17 +130,15 @@ def build_ozon_stocks_from_ms() -> tuple[list[dict], int, list[dict]]:
     names_by_article: dict[str, str] = {}
 
     for row in rows:
-    article = row.get("article")
-    if not article:
-        continue
+        article = row.get("article")
+        if not article:
+            continue
 
-    if article == "10561":
-        print("[DEBUG 10561]",
-              "store_id:", ms_store_id,
-              "raw_stock:", row.get("stock"),
-              "full_row:", row)
-
-    ...
+        if article == "10561":
+            print("[DEBUG 10561]",
+                  "store_id:", ms_store_id,
+                  "raw_stock:", row.get("stock"),
+                  "full_row:", row)
     
     # 1. Собираем остатки по каждому складу МС, участвующему в интеграции
     for ms_store_id, ozon_wh_id in WAREHOUSE_MAP.items():
