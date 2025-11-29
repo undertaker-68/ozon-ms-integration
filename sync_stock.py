@@ -301,7 +301,8 @@ def main(dry_run: bool | None = None) -> None:
 
     print(f"[STOCK] DRY_RUN={dry_run}")
 
-    stocks, skipped_not_found = build_ozon_stocks_from_ms()
+    # Теперь build_ozon_stocks_from_ms возвращает ещё и report_rows
+    stocks, skipped_not_found, report_rows = build_ozon_stocks_from_ms()
     print(f"[STOCK] Пропущено (товар не найден на Ozon): {skipped_not_found}")
     print(f"[STOCK] Позиций для отправки в Ozon: {len(stocks)}")
 
@@ -313,9 +314,9 @@ def main(dry_run: bool | None = None) -> None:
         print("[STOCK] Список остатков пуст, обновлять в Ozon нечего.")
         return
 
-    print("[STOCK] Отправляем остатки в Ozon...")
-
     data = update_stocks(stocks)
+
+    # data — это dict вида {"result": [...]}
     result_items = data.get("result", []) if isinstance(data, dict) else []
     errors_present = any((item.get("errors") or []) for item in result_items)
 
@@ -325,8 +326,11 @@ def main(dry_run: bool | None = None) -> None:
     else:
         print("[STOCK] Обновление в Ozon завершено с ошибками (подробности в логах / Telegram).")
 
-    # Итоговое уведомление в Telegram: только если ошибок нет
+    # Итоговое уведомление в Telegram: только если ошибок нет (как и было)
     _send_success_summary_telegram(stocks, errors_present)
+
+    # А файл с отчётом отправляем всегда, если в принципе были строки
+    _send_stock_report_file(report_rows)
 
 
 if __name__ == "__main__":
