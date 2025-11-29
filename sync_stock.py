@@ -252,6 +252,48 @@ def _send_success_summary_telegram(stocks: list[dict], errors_present: bool) -> 
     except Exception as e:
         print(f"[STOCK] Не удалось отправить Telegram-резюме: {e!r}")
 
+def _send_stock_report_file(report_rows: list[dict]) -> None:
+    """
+    Создаёт CSV-файл формата:
+    № п/п; Наименование; Артикул; Кол-во
+    и отправляет его в Telegram.
+
+    report_rows — список словарей:
+      {"name", "article", "stock", "warehouse_id"}.
+    """
+    if not report_rows:
+        print("[STOCK] Нет данных для отчёта по остаткам, файл не отправляется.")
+        return
+
+    # Создаём временный файл .csv
+    fd, tmp_path = tempfile.mkstemp(prefix="ozon_stock_", suffix=".csv")
+    os.close(fd)
+
+    try:
+        with open(tmp_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f, delimiter=";")
+            # Заголовки как ты просил
+            writer.writerow(["№ п/п", "Наименование", "Артикул", "Кол-во"])
+
+            for idx, row in enumerate(report_rows, start=1):
+                writer.writerow([
+                    idx,
+                    row.get("name", ""),
+                    row.get("article", ""),
+                    row.get("stock", 0),
+                ])
+
+        caption = "Отчёт по переданным остаткам в Ozon " + datetime.now().strftime("%Y-%m-%d %H:%M")
+        ok = send_telegram_document(tmp_path, caption=caption)
+        print(f"[STOCK] Файл с отчётом по остаткам "
+              f"{'успешно отправлен в Telegram' if ok else 'не удалось отправить в Telegram'}: {tmp_path}")
+    finally:
+        # Удаляем временный файл, чтобы не засорять диск
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+
 
 def main(dry_run: bool | None = None) -> None:
     if dry_run is None:
