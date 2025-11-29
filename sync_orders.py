@@ -139,6 +139,7 @@ def notify_zero_stock_if_changed(posting: dict, ms_positions: list, stocks_befor
     """
     После обработки отправления (обычно статус delivering) проверяем:
     если у какого-то артикула остаток в МС был >0, а стал 0 — шлём уведомление.
+    Остатки считаем по тому же складу MS_OZON_STORE_HREF, фильтрация по assortment.
     """
     posting_number = posting.get("posting_number")
     changed = []
@@ -148,8 +149,14 @@ def notify_zero_stock_if_changed(posting: dict, ms_positions: list, stocks_befor
         if not article:
             continue
 
+        ms_meta = pos.get("ms_meta") or {}
+        assortment_meta = ms_meta.get("href")
+        if not assortment_meta:
+            continue
+
         before = stocks_before.get(article)
-        after = get_stock_by_article(article)
+
+        after = get_stock_by_assortment_href(assortment_meta)
         try:
             b = int(before) if before is not None else None
             a = int(after) if after is not None else None
