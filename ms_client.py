@@ -18,38 +18,43 @@ session.headers.update({
 })
 
 
-def get_stock_all(limit: int = 1000, offset: int = 0, store_id: str | None = None) -> dict:
+def get_stock_all(limit: int = 100, offset: int = 0, store_id: str | None = None) -> dict:
     """
-    Получить остатки по складу через /entity/assortment.
+    Получаем остатки через /entity/assortment.
 
     ВАЖНО:
-    - /report/stock/all -> поле stock = общий остаток по организации.
-    - /entity/assortment + stockStore -> поле stock = остаток по указанному складу.
+      - Работает по одному складу.
+      - Фильтр по складу делаем через filter=stockStore=<href склада>.
+      - stockMode=all, чтобы видеть и нули, и отрицательные остатки.
 
-    Поэтому здесь мы используем именно assortment, а не report/stock/all.
+    Возвращает сырой ответ JSON от МойСклад (dict).
     """
     url = f"{BASE_URL}/entity/assortment"
 
     params: dict[str, object] = {
         "limit": limit,
         "offset": offset,
-        # Показывать ВСЕ товары, включая с нулевыми и отрицательными остатками
         "stockMode": "all",
     }
 
-    if store_id:
-        # Если передали полный href склада — используем как есть
-        if store_id.startswith("http"):
-            stock_store_href = store_id
-        else:
-            stock_store_href = f"{BASE_URL}/entity/store/{store_id}"
+    # Если склад не передан явно — используем MS_OZON_STORE_ID из .env
+    if store_id is None:
+        if not MS_OZON_STORE_ID:
+            raise RuntimeError("Не задан MS_OZON_STORE_ID в .env и не передан store_id в get_stock_all")
+        store_id = MS_OZON_STORE_ID
 
-        # Этот параметр как раз фильтрует остатки по складу
-        params["stockStore"] = stock_store_href
+    # Собираем href склада
+    if str(store_id).startswith("http"):
+        stock_store_href = store_id
+    else:
+        stock_store_href = f"{BASE_URL}/entity/store/{store_id}"
 
-    resp = session.get(url, params=params, timeout=30)
-    resp.raise_for_status()
-    return resp.json()
+    # 🔴 ГЛАВНОЕ ИСПРАВЛЕНИЕ:
+    # Вместо отдельного параметра stockStore используем filter=stockStore=<href>
+    params["filter"] = f"stockStore={stock_store_href}"
+
+    data = _ms_get(url, params=params)
+    return data
 
 
 def find_product_by_article(article: str) -> dict | None:
