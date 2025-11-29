@@ -110,7 +110,7 @@ def _fetch_ms_stock_rows_for_store(ms_store_id: str, limit: int = 1000) -> list[
     return rows
 
 
-def build_ozon_stocks_from_ms() -> tuple[list[dict], int]:
+def build_ozon_stocks_from_ms() -> tuple[list[dict], int, list[dict]]:
     """
     Собираем список остатков для отправки в Ozon по нескольким складам МС.
     Учитываем ТОЛЬКО те склады, которые описаны в WAREHOUSE_MAP.
@@ -119,8 +119,15 @@ def build_ozon_stocks_from_ms() -> tuple[list[dict], int]:
       - Ozon не принимает отрицательные остатки, поэтому stock < 0 → 0.
       - Товары из IGNORE_STOCK_OFFERS полностью пропускаются.
       - Остатки передаются отдельно по каждому складу Ozon (warehouse_id из WAREHOUSE_MAP).
+
+    Возвращает:
+      stocks         — список словарей для Ozon: {"offer_id", "stock", "warehouse_id"}
+      skipped_not_found — сколько артикулов не найдено в Ozon
+      report_rows    — список строк для отчётного файла:
+                       {"name", "article", "stock", "warehouse_id"}
     """
     candidates: list[tuple[str, int, int]] = []  # (article, stock, ozon_warehouse_id)
+    names_by_article: dict[str, str] = {}
 
     # 1. Собираем остатки по каждому складу МС, участвующему в интеграции
     for ms_store_id, ozon_wh_id in WAREHOUSE_MAP.items():
@@ -131,6 +138,13 @@ def build_ozon_stocks_from_ms() -> tuple[list[dict], int]:
             article = row.get("article")
             if not article:
                 continue
+
+            # Имя товара пытаемся взять из строки отчёта
+            name = (
+                row.get("name")
+                or (row.get("assortment") or {}).get("name")
+                or ""
+            )
 
             if article in IGNORE_STOCK_OFFERS:
                 print(f"[STOCK] ⛔ Пропуск по игнор-листу: {article}")
@@ -148,9 +162,13 @@ def build_ozon_stocks_from_ms() -> tuple[list[dict], int]:
 
             candidates.append((article, stock_int, ozon_wh_id))
 
+            # Запомнить имя товара по артикулу для будущего отчёта
+            if article not in names_by_article and name:
+                names_by_article[article] = name
+
     if not candidates:
         print("[STOCK] Нет кандидатов для отправки в Ozon (список остатков пуст).")
-        return [], 0
+        return [], 0, []
 
     # 2. Проверяем, какие offer_id вообще существуют в Ozon (по артикулу, без привязки к складу)
     offer_ids = list({art for art, _, _ in candidates})
@@ -193,7 +211,20 @@ def build_ozon_stocks_from_ms() -> tuple[list[dict], int]:
             except Exception:
                 pass
 
-    return stocks, skipped_not_found
+    # Формируем строки для отчётного файла ИМЕННО по тем позициям, которые реально отправляем в Ozon
+    report_rows: list[dict] = []
+    for s in stocks:
+        art = s["offer_id"]
+        report_rows.append(
+            {
+                "name": names_by_article.get(art, ""),
+                "article": art,
+                "stock": s["stock"],
+                "warehouse_id": s["warehouse_id"],
+            }
+        )
+
+    return stocks, skipped_not_found, report_rows
 
 
 def _send_success_summary_telegram(stocks: list[dict], errors_present: bool) -> None:
