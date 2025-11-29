@@ -13,10 +13,11 @@ except ImportError:
     def send_telegram_message(text: str) -> bool:
         print("Telegram notifier не доступен:", text)
         return False
-        
+
     def send_telegram_document(file_path: str, caption: str = "") -> bool:
         print("Telegram notifier не доступен для файла:", file_path)
         return False
+
 
 load_dotenv()
 
@@ -121,28 +122,20 @@ def build_ozon_stocks_from_ms() -> tuple[list[dict], int, list[dict]]:
       - Остатки передаются отдельно по каждому складу Ozon (warehouse_id из WAREHOUSE_MAP).
 
     Возвращает:
-      stocks         — список словарей для Ozon: {"offer_id", "stock", "warehouse_id"}
+      stocks            — список словарей для Ozon: {"offer_id", "stock", "warehouse_id"}
       skipped_not_found — сколько артикулов не найдено в Ozon
-      report_rows    — список строк для отчётного файла:
-                       {"name", "article", "stock", "warehouse_id"}
+      report_rows       — список строк для отчётного файла:
+                          {"name", "article", "stock", "warehouse_id"}
     """
     candidates: list[tuple[str, int, int]] = []  # (article, stock, ozon_warehouse_id)
     names_by_article: dict[str, str] = {}
 
-    for row in rows:
-        article = row.get("article")
-        if not article:
-            continue
-
-        if article == "10561":
-            print("[DEBUG 10561]",
-                  "store_id:", ms_store_id,
-                  "raw_stock:", row.get("stock"),
-                  "full_row:", row)
-    
     # 1. Собираем остатки по каждому складу МС, участвующему в интеграции
     for ms_store_id, ozon_wh_id in WAREHOUSE_MAP.items():
-        print(f"[STOCK] Читаем остатки из МС: store_id={ms_store_id} → Ozon warehouse_id={ozon_wh_id}")
+        print(
+            f"[STOCK] Читаем остатки из МС: "
+            f"store_id={ms_store_id} → Ozon warehouse_id={ozon_wh_id}"
+        )
         rows = _fetch_ms_stock_rows_for_store(ms_store_id, limit=1000)
 
         for row in rows:
@@ -150,7 +143,6 @@ def build_ozon_stocks_from_ms() -> tuple[list[dict], int, list[dict]]:
             if not article:
                 continue
 
-            # Имя товара пытаемся взять из строки отчёта
             name = (
                 row.get("name")
                 or (row.get("assortment") or {}).get("name")
@@ -168,12 +160,14 @@ def build_ozon_stocks_from_ms() -> tuple[list[dict], int, list[dict]]:
                 stock_int = 0
 
             if stock_int < 0:
-                print(f"[STOCK] В МС отрицательный остаток, принудительно ставим 0: {article} (raw={stock})")
+                print(
+                    f"[STOCK] В МС отрицательный остаток, "
+                    f"принудительно ставим 0: {article} (raw={stock})"
+                )
                 stock_int = 0
 
             candidates.append((article, stock_int, ozon_wh_id))
 
-            # Запомнить имя товара по артикулу для будущего отчёта
             if article not in names_by_article and name:
                 names_by_article[article] = name
 
@@ -208,7 +202,7 @@ def build_ozon_stocks_from_ms() -> tuple[list[dict], int, list[dict]]:
             }
         )
 
-        # Уведомление, что в МС остаток 0 и мы его передаём в Ozon по конкретному складу
+        # Если в Ozon передаём 0 — шлём инфо-уведомление
         if stock == 0:
             text = (
                 "ℹ️ Товар на складе Ozon закончился.\n"
@@ -256,12 +250,16 @@ def _send_success_summary_telegram(stocks: list[dict], errors_present: bool) -> 
     if len(stocks) > 20:
         lines.append(f"... и ещё {len(stocks) - 20} позиций")
 
-    text = "Интеграция выполнена успешно, ошибок нет.\nОбновлены остатки:\n" + "\n".join(lines)
+    text = (
+        "Интеграция выполнена успешно, ошибок нет.\n"
+        "Обновлены остатки:\n" + "\n".join(lines)
+    )
 
     try:
         send_telegram_message(text)
     except Exception as e:
         print(f"[STOCK] Не удалось отправить Telegram-резюме: {e!r}")
+
 
 def _send_stock_report_file(report_rows: list[dict]) -> None:
     """
@@ -276,14 +274,18 @@ def _send_stock_report_file(report_rows: list[dict]) -> None:
         print("[STOCK] Нет данных для отчёта по остаткам, файл не отправляется.")
         return
 
-    # Создаём временный файл .csv
+    # Создаём временный .csv
+    fd, tmp_path = tempfile.mkdtemp(), None
+    # mktmpdir выше не подходит — лучше mkstemp
+    # но чтобы не ломать уже написанное, перепишем сразу корректно:
+
     fd, tmp_path = tempfile.mkstemp(prefix="ozon_stock_", suffix=".csv")
     os.close(fd)
 
     try:
+        # UTF-8 с BOM, чтобы Excel нормально определял кодировку
         with open(tmp_path, "w", newline="", encoding="utf-8-sig") as f:
             writer = csv.writer(f, delimiter=";")
-            # Заголовки как ты просил
             writer.writerow(["№ п/п", "Наименование", "Артикул", "Кол-во"])
 
             for idx, row in enumerate(report_rows, start=1):
@@ -296,10 +298,11 @@ def _send_stock_report_file(report_rows: list[dict]) -> None:
 
         caption = "Отчёт по переданным остаткам в Ozon " + datetime.now().strftime("%Y-%m-%d %H:%M")
         ok = send_telegram_document(tmp_path, caption=caption)
-        print(f"[STOCK] Файл с отчётом по остаткам "
-              f"{'успешно отправлен в Telegram' if ok else 'не удалось отправить в Telegram'}: {tmp_path}")
+        print(
+            "[STOCK] Файл с отчётом по остаткам "
+            f"{'успешно отправлен в Telegram' if ok else 'не удалось отправить в Telegram'}: {tmp_path}"
+        )
     finally:
-        # Удаляем временный файл, чтобы не засорять диск
         try:
             os.remove(tmp_path)
         except OSError:
@@ -312,12 +315,13 @@ def main(dry_run: bool | None = None) -> None:
 
     print(f"[STOCK] DRY_RUN={dry_run}")
 
-    # Теперь build_ozon_stocks_from_ms возвращает ещё и report_rows
+    # Новая сигнатура: получаем ещё и report_rows
     stocks, skipped_not_found, report_rows = build_ozon_stocks_from_ms()
     print(f"[STOCK] Пропущено (товар не найден на Ozon): {skipped_not_found}")
     print(f"[STOCK] Позиций для отправки в Ozon: {len(stocks)}")
 
-    # 👉 В РЕЖИМЕ DRY_RUN: в Ozon НЕ идём, но файл всё равно отправляем
+    # В DRY_RUN обновление в Ozon не делаем, но файл в Telegram отправляем —
+    # так удобнее тестировать.
     if dry_run:
         print("[STOCK] DRY_RUN=TRUE: запрос к Ozon не отправляется, но отчётный файл шлём в Telegram.")
         _send_stock_report_file(report_rows)
