@@ -1,16 +1,22 @@
 import os
+import csv
+import tempfile
+from datetime import datetime
 from dotenv import load_dotenv
 
 from ms_client import get_stock_all
 from ozon_client import get_products_state_by_offer_ids, update_stocks
 
 try:
-    from notifier import send_telegram_message
+    from notifier import send_telegram_message, send_telegram_document
 except ImportError:
     def send_telegram_message(text: str) -> bool:
         print("Telegram notifier не доступен:", text)
         return False
-
+        
+    def send_telegram_document(file_path: str, caption: str = "") -> bool:
+        print("Telegram notifier не доступен для файла:", file_path)
+        return False
 
 load_dotenv()
 
