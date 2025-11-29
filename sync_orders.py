@@ -246,35 +246,42 @@ def process_posting(posting: dict, dry_run: bool) -> None:
         print(f"[ORDERS] Заказ {order_name}: статус обновлён на 'Ожидают отгрузки'.")
 
     elif status == "delivering":
-        # Заказ в доставке: статус "Доставляются", снять резерв, создать Отгрузку
-        # и проверить, не ушёл ли остаток в 0
-        articles = {pos.get("article") for pos in ms_positions if pos.get("article")}
-        stocks_before: dict[str, int | None] = {}
-        for art in articles:
-            stocks_before[art] = get_stock_by_article(art)
+    # Заказ в доставке: статус "Доставляются", снять резерв, создать Отгрузку
+    # и проверить, не ушёл ли остаток в 0
 
-        if not existing_order:
-            print(f"[ORDERS] {order_name}: заказ не найден, создаём перед отгрузкой.")
-            if dry_run:
-                print("[ORDERS] DRY_RUN_ORDERS=TRUE: создание заказа пропущено.")
-                return
-            order_payload = build_customer_order_payload(posting, ms_positions)
-            created = create_customer_order(order_payload)
-            existing_order = created
+    stocks_before: dict[str, int | None] = {}
 
-        href = existing_order["meta"]["href"]
-        print(f"[ORDERS] Обновление {order_name}: статус 'Доставляются', снятие резерва, создание отгрузки.")
+    # Снимаем остатки "до" по каждому ассортимента по складу Ozon
+    for pos in ms_positions:
+        article = pos.get("article")
+        ms_meta = pos.get("ms_meta") or {}
+        assortment_meta = ms_meta.get("href")
+        if not article or not assortment_meta:
+            continue
+        stocks_before[article] = get_stock_by_assortment_href(assortment_meta)
+
+    if not existing_order:
+        print(f"[ORDERS] {order_name}: заказ не найден, создаём перед отгрузкой.")
         if dry_run:
-            print("[ORDERS] DRY_RUN_ORDERS=TRUE: изменения в МС не выполняются.")
+            print("[ORDERS] DRY_RUN_ORDERS=TRUE: создание заказа пропущено.")
             return
+        order_payload = build_customer_order_payload(posting, ms_positions)
+        created = create_customer_order(order_payload)
+        existing_order = created
 
-        if MS_STATE_DELIVERING:
-            update_customer_order_state(href, MS_STATE_DELIVERING)
-        clear_reserve_for_order(href)
-        create_demand_from_order(href)
+    href = existing_order["meta"]["href"]
+    print(f"[ORDERS] Обновление {order_name}: статус 'Доставляются', снятие резерва, создание отгрузки.")
+    if dry_run:
+        print("[ORDERS] DRY_RUN_ORDERS=TRUE: изменения в МС не выполняются.")
+        return
 
-        notify_zero_stock_if_changed(posting, ms_positions, stocks_before)
-        print(f"[ORDERS] Заказ {order_name}: резерв снят, отгрузка создана.")
+    if MS_STATE_DELIVERING:
+        update_customer_order_state(href, MS_STATE_DELIVERING)
+    clear_reserve_for_order(href)
+    create_demand_from_order(href)
+
+    notify_zero_stock_if_changed(posting, ms_positions, stocks_before)
+    print(f"[ORDERS] Заказ {order_name}: резерв снят, отгрузка создана.")
 
     elif status == "cancelled":
         # Отмена: снять резерв и поставить статус "Отменён"
