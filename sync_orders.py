@@ -135,16 +135,26 @@ def get_ozon_orders(limit: int = 10):
     }
     payload = {
         "filter": {
-            "status": "DELIVERING",  # Статус заказа, например 'DELIVERING' (доставляется)
+            "status": "DELIVERING",  # Заказы в процессе доставки
             "limit": limit
         }
     }
+    
     try:
-        # Отправляем POST запрос с правильным параметром
+        # Отправляем запрос
         response = requests.post(url, headers=headers, json=payload)
-        response.raise_for_status()
-        print(f"Получены заказы: {len(response.json().get('result', []))}")
-        return response.json().get('result', [])
+        print("Ответ от Ozon:", response.text)  # Логирование ответа для отладки
+        
+        response.raise_for_status()  # Проверка на успешный ответ
+        data = response.json()
+        
+        if 'result' in data:
+            print(f"Получены заказы: {len(data['result'])}")
+            return data['result']
+        else:
+            print(f"Ошибка: Нет поля 'result' в ответе Ozon. Ответ: {data}")
+            return []
+        
     except requests.exceptions.RequestException as e:
         print(f"Ошибка при запросе заказов с Ozon: {str(e)}")
         return []
