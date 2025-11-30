@@ -125,7 +125,6 @@ def is_discounted_product(ozon_product: dict) -> bool:
         return True
     return False
 
-# Исправленный код с правильным импортом
 def get_ozon_orders(limit: int = 10):
     """Получаем заказы с Ozon"""
     url = f"{OZON_API_URL}posting/fbs/list"
