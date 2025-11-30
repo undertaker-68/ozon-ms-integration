@@ -384,7 +384,7 @@ def process_posting(posting: dict, dry_run: bool):
     print(f"[ORDERS] Статус '{status}' пока не обрабатывается.")
 
 
-def sync_fbs_orders(dry_run: bool, limit: int = 3):
+def sync_fbs_orders(dry_run: bool, limit: int = 300):
     print(f"[ORDERS] Старт sync_fbs_orders, DRY_RUN_ORDERS={dry_run}")
 
     data = get_fbs_postings(limit=limit)
@@ -420,4 +420,4 @@ def sync_fbs_orders(dry_run: bool, limit: int = 3):
 
 if __name__ == "__main__":
     print("Запуск синхронизации заказов Ozon с МойСклад...")
-    sync_fbs_orders(dry_run=DRY_RUN_ORDERS, limit=10)
+    sync_fbs_orders(dry_run=DRY_RUN_ORDERS, limit=300)
