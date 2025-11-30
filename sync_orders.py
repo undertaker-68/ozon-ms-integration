@@ -136,7 +136,7 @@ def get_ozon_orders(limit: int = 10):
     }
 
     # Получаем текущую дату и время в формате ISO 8601: 'YYYY-MM-DDTHH:MM:SS'
-    processed_at_from = datetime.datetime.now().isoformat()
+    processed_at_from = datetime.now().isoformat()
 
     payload = {
         "filter": {
