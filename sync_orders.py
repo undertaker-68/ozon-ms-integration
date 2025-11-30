@@ -2,9 +2,8 @@ import os
 import csv
 from datetime import datetime
 import requests
+import asyncio
 from dotenv import load_dotenv
-import telegram
-
 from ozon_client import get_fbs_postings
 from ms_client import (
     find_product_by_article,
@@ -14,6 +13,7 @@ from ms_client import (
     clear_reserve_for_order,
     create_demand_from_order,
 )
+from telegram import Bot
 
 try:
     from notifier import send_telegram_message
@@ -188,12 +188,12 @@ def build_ms_positions_from_posting(posting: dict) -> list[dict]:
 
     return ms_positions
 
-def send_report_to_telegram(file_path):
-    """Функция для отправки файла в Telegram."""
-    bot = telegram.Bot(token=os.getenv('TG_BOT_TOKEN'))
+async def send_report_to_telegram(file_path):
+    """Функция для отправки файла в Telegram асинхронно."""
+    bot = Bot(token=os.getenv('TG_BOT_TOKEN'))
     chat_id = os.getenv('TG_CHAT_ID')
     with open(file_path, "rb") as f:
-        bot.send_document(chat_id=chat_id, document=f)
+        await bot.send_document(chat_id=chat_id, document=f)
 
 def sync_fbs_orders(dry_run: bool, limit: int = 300):
     print(f"[ORDERS] Старт sync_fbs_orders, DRY_RUN_ORDERS={dry_run}")
@@ -215,7 +215,7 @@ def sync_fbs_orders(dry_run: bool, limit: int = 300):
 
     # После обработки заказов — отправляем файл с ошибками в Telegram
     _append_order_errors_to_file(error_rows)
-    send_report_to_telegram(ERRORS_FILE_PATH)
+    asyncio.run(send_report_to_telegram(ERRORS_FILE_PATH))  # Асинхронно отправляем файл
 
 if __name__ == "__main__":
     print("Запуск синхронизации заказов Ozon с МойСклад...")
