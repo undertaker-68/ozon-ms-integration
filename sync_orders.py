@@ -174,3 +174,14 @@ def sync_fbs_orders(dry_run: bool = True, limit: int = 10):
                 f"Номер отправления: {posting_number}\n"
                 f"Причина: {reason}"
             )
+
+            print("[ORDERS]", msg.replace("\n", " | "))
+            try:
+                send_telegram_message(msg)
+            except Exception:
+                pass
+
+            error_rows.extend(_build_error_rows_for_posting(posting, reason))
+
+    # После обработки всех отправлений — записываем CSV
+    _append_order_errors_to_file(error_rows)
