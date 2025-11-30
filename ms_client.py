@@ -355,12 +355,25 @@ def clear_reserve_for_order(order_meta_href: str) -> dict:
 
 def create_demand_from_order(order_meta_href: str) -> dict:
     """
-    Создать Отгрузку (demand) на основе заказа.
+    Создать Отгрузку (demand) на основе заказа покупателя.
     """
+    # 1. Читаем заказ
     r = requests.get(order_meta_href, headers=HEADERS, timeout=30)
     r.raise_for_status()
     order = r.json()
 
+    # 2. Получаем meta ссылку на позиции
+    pos_meta_href = order.get("positions", {}).get("meta", {}).get("href")
+    if not pos_meta_href:
+        print("[MS ERROR] Нет позиций в заказе — не можем создать отгрузку")
+        return {}
+
+    # 3. Загружаем позиции заказа
+    r_pos = requests.get(pos_meta_href, headers=HEADERS, timeout=30)
+    r_pos.raise_for_status()
+    positions = r_pos.json().get("rows", [])
+
+    # 4. Формируем payload
     demand_payload = {
         "customerOrder": {"meta": order["meta"]},
         "organization": order.get("organization"),
@@ -369,7 +382,7 @@ def create_demand_from_order(order_meta_href: str) -> dict:
         "positions": [],
     }
 
-    for pos in order.get("positions", []):
+    for pos in positions:
         demand_payload["positions"].append(
             {
                 "quantity": pos.get("quantity", 0),
@@ -377,9 +390,11 @@ def create_demand_from_order(order_meta_href: str) -> dict:
             }
         )
 
+    # 5. Создаём отгрузку
     url = f"{BASE_URL}/entity/demand"
     r_post = requests.post(url, headers=HEADERS, json=demand_payload, timeout=30)
     if r_post.status_code >= 400:
-        print(f"[MS ERROR] create_demand_from_order status={r_post.status_code} body={r_post.text[:500]}")
+        print(f"[MS ERROR] create_demand status={r_post.status_code} body={r_post.text[:500]}")
     r_post.raise_for_status()
+
     return r_post.json()
