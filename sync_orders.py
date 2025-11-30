@@ -4,6 +4,7 @@ import json
 from datetime import datetime
 import requests
 from dotenv import load_dotenv
+from ozon_client import get_fbs_postings
 
 # Загрузка переменных окружения
 load_dotenv()
@@ -125,45 +126,6 @@ def is_discounted_product(ozon_product: dict) -> bool:
         return True
     return False
 
-def get_ozon_orders(limit: int = 10):
-    """Получаем заказы с Ozon"""
-    url = f"{OZON_API_URL}posting/fbs/list"
-    headers = {
-        "Client-Id": OZON_CLIENT_ID,
-        "Api-Key": OZON_API_KEY,
-        "Content-Type": "application/json"
-    }
-
-    # Получаем текущую дату и время в формате ISO 8601: 'YYYY-MM-DDTHH:MM:SS'
-    processed_at_from = datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
-
-    payload = {
-        "filter": {
-            "status": "DELIVERING",  # Заказы в процессе доставки
-            "limit": limit,
-            "processedAtFrom": processed_at_from  # Используем формат ISO 8601
-        }
-    }
-
-    try:
-        # Отправляем запрос
-        response = requests.post(url, headers=headers, json=payload)
-        print("Ответ от Ozon:", response.text)  # Логирование ответа для отладки
-        
-        response.raise_for_status()  # Проверка на успешный ответ
-        data = response.json()
-        
-        if 'result' in data:
-            print(f"Получены заказы: {len(data['result'])}")
-            return data['result']
-        else:
-            print(f"Ошибка: Нет поля 'result' в ответе Ozon. Ответ: {data}")
-            return []
-        
-    except requests.exceptions.RequestException as e:
-        print(f"Ошибка при запросе заказов с Ozon: {str(e)}")
-        return []
-
 def process_posting(posting: dict, dry_run: bool = True):
     """Обрабатываем отправление Ozon"""
     posting_number = posting.get("posting_number")
@@ -196,7 +158,11 @@ def process_posting(posting: dict, dry_run: bool = True):
 
 def sync_fbs_orders(dry_run: bool = True, limit: int = 10):
     """Основная функция для синхронизации заказов FBS"""
-    postings = get_ozon_orders(limit=limit)
+
+    # Берём данные через уже настроенный ozon_client
+    data = get_fbs_postings(limit=limit)
+    postings = data.get("result", {}).get("postings", [])
+
     error_rows: list[dict] = []
 
     for posting in postings:
