@@ -129,6 +129,8 @@ import datetime
 
 import datetime
 
+import datetime
+
 def get_ozon_orders(limit: int = 10):
     """Получаем заказы с Ozon"""
     url = f"{OZON_API_URL}posting/fbs/list"
@@ -138,17 +140,17 @@ def get_ozon_orders(limit: int = 10):
         "Content-Type": "application/json"
     }
 
-    # Получаем текущую дату в формате YYYY-MM-DD
-    processed_at_from = datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
+    # Получаем текущую дату и время в формате ISO 8601: 'YYYY-MM-DDTHH:MM:SS'
+    processed_at_from = datetime.datetime.now().isoformat()
 
     payload = {
         "filter": {
             "status": "DELIVERING",  # Заказы в процессе доставки
             "limit": limit,
-            "processedAtFrom": processed_at_from  # Добавляем дату
+            "processedAtFrom": processed_at_from  # Используем формат ISO 8601
         }
     }
-    
+
     try:
         # Отправляем запрос
         response = requests.post(url, headers=headers, json=payload)
