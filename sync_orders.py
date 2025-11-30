@@ -186,3 +186,7 @@ def sync_fbs_orders(dry_run: bool = True, limit: int = 10):
 
     # После обработки всех отправлений — записываем CSV
     _append_order_errors_to_file(error_rows)
+
+if __name__ == "__main__":
+    print("Запуск синхронизации заказов...")
+    sync_fbs_orders(dry_run=DRY_RUN_ORDERS, limit=10)
