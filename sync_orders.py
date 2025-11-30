@@ -10,11 +10,15 @@ load_dotenv()
 
 DRY_RUN_ORDERS = os.getenv("DRY_RUN_ORDERS", "true").lower() == "true"
 
+# Добавляем параметры для работы с Ozon API
+OZON_API_URL = "https://api-seller.ozon.ru/v2/"  # Окончательная версия API Ozon
+OZON_CLIENT_ID = os.getenv("OZON_CLIENT_ID")  # Получить из переменной окружения
+OZON_API_KEY = os.getenv("OZON_API_KEY")  # Получить из переменной окружения
+
 ERRORS_FILE_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "orders_errors.csv",
 )
-print("Запуск синхронизации заказов Ozon с МойСклад...")
 
 def _human_error_from_exception(e: Exception) -> str:
     """Функция для преобразования ошибок в читаемые сообщения для пользователя"""
@@ -114,14 +118,32 @@ def _build_error_rows_for_posting(posting: dict, reason: str) -> list[dict]:
 
 def is_discounted_product(ozon_product: dict) -> bool:
     """Определяем, является ли товар уценённым на основе скидки или других характеристик"""
-    # Пример распознавания: если есть discount_price или sale_price и цена товара со скидкой меньше обычной цены
     price = ozon_product.get('price', 0)
     discounted_price = ozon_product.get('discount_price', 0)
     
-    # Если у товара есть скидка и цена со скидкой меньше обычной цены, то товар уценён
     if discounted_price and discounted_price < price:
         return True
     return False
+
+def get_ozon_orders(limit: int = 10):
+    """Получаем заказы с Ozon"""
+    url = f"{OZON_API_URL}posting/fbs/list"
+    headers = {
+        "Client-Id": OZON_CLIENT_ID,
+        "Api-Key": OZON_API_KEY,
+        "Content-Type": "application/json"
+    }
+    params = {
+        "limit": limit,
+    }
+    try:
+        response = requests.get(url, headers=headers, params=params)
+        response.raise_for_status()
+        print(f"Получены заказы: {len(response.json().get('result', []))}")
+        return response.json().get('result', [])
+    except requests.exceptions.RequestException as e:
+        print(f"Ошибка при запросе заказов с Ozon: {str(e)}")
+        return []
 
 def process_posting(posting: dict, dry_run: bool = True):
     """Обрабатываем отправление Ozon"""
@@ -133,25 +155,20 @@ def process_posting(posting: dict, dry_run: bool = True):
         print(f"[ORDERS] Статус не 'Доставляется' для {posting_number}, пропускаем.")
         return
 
-    # Получаем список товаров из заказа
     products = posting.get("products", [])
     for product in products:
         offer_id = product.get("offer_id", "")
         print(f"[MS] Найден в {offer_id}: {product.get('name')}")
 
-        # Проверяем, уценён ли товар
         if is_discounted_product(product):
             print(f"[MS] Уценённый товар: {offer_id}, {product.get('name')}")
             product['quantity'] = 1  # отправляем 1 ед.
 
-        # Здесь будет логика для создания отгрузки и снятия резерва, если товар не уценён
         try:
             create_demand_from_order(posting_number)
         except Exception as e:
             reason = _human_error_from_exception(e)
             print(f"[ORDERS] ❗ Ошибка обработки отправления {posting_number} | причина: {reason}")
-            
-            # Запись в CSV и Telegram
             error_rows = _build_error_rows_for_posting(posting, reason)
             _append_order_errors_to_file(error_rows)
 
@@ -184,15 +201,8 @@ def sync_fbs_orders(dry_run: bool = True, limit: int = 10):
 
             error_rows.extend(_build_error_rows_for_posting(posting, reason))
 
-    # После обработки всех отправлений — записываем CSV
     _append_order_errors_to_file(error_rows)
-def get_ozon_orders(limit: int = 10):
-    print(f"Запрос на получение {limit} заказов с Ozon...")
-    # Код для получения заказов с Ozon
-    response = requests.get("URL для получения заказов")  # Укажи реальный URL
-    print("Ответ от Ozon:", response.json())  # Проверим, что получаем
-    return response.json()
 
 if __name__ == "__main__":
-    print("Запуск синхронизации заказов...")
+    print("Запуск синхронизации заказов Ozon с МойСклад...")
     sync_fbs_orders(dry_run=DRY_RUN_ORDERS, limit=10)
