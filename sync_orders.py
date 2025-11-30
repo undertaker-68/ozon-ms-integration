@@ -14,6 +14,7 @@ ERRORS_FILE_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "orders_errors.csv",
 )
+print("Запуск синхронизации заказов Ozon с МойСклад...")
 
 def _human_error_from_exception(e: Exception) -> str:
     """Функция для преобразования ошибок в читаемые сообщения для пользователя"""
