@@ -203,9 +203,21 @@ def sync_fbs_orders(dry_run: bool, limit: int = 300):
 
     print(f"[ORDERS] Найдено отправлений: {len(postings)}")
 
+    # Определяем дату, до которой заказы должны быть игнорированы
+    cutoff_date = datetime(2025, 11, 30)
+
     error_rows: list[dict] = []
 
     for posting in postings:
+        # Получаем дату создания заказа
+        created_date_str = posting.get("created")
+        created_date = datetime.strptime(created_date_str, "%Y-%m-%d") if created_date_str else None
+
+        # Пропускаем заказ, если он был создан до 30.11.2025
+        if created_date and created_date < cutoff_date:
+            print(f"[ORDERS] Заказ {posting.get('posting_number')} создан до 30.11.2025, пропускаем.")
+            continue  # Пропускаем этот заказ
+
         try:
             process_posting(posting, dry_run)
         except Exception as e:
