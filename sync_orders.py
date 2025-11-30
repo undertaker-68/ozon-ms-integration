@@ -1,4 +1,9 @@
 import os
+import csv
+import json
+from datetime import datetime
+
+import requests
 from dotenv import load_dotenv
 
 from ozon_client import get_fbs_postings
@@ -24,6 +29,11 @@ load_dotenv()
 
 DRY_RUN_ORDERS = os.getenv("DRY_RUN_ORDERS", "true").lower() == "true"
 
+ERRORS_FILE_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "orders_errors.csv",
+)
+
 MS_STATE_AWAIT_PACK = os.getenv("MS_STATE_AWAIT_PACK")
 MS_STATE_AWAIT_SHIP = os.getenv("MS_STATE_AWAIT_SHIP")
 MS_STATE_DELIVERING = os.getenv("MS_STATE_DELIVERING")
@@ -40,6 +50,56 @@ if not (MS_ORGANIZATION_HREF and MS_AGENT_HREF and MS_STORE_HREF):
         "Не заданы MS_ORGANIZATION_HREF / MS_AGENT_HREF / MS_STORE_HREF. "
         "Скопируйте meta.href из МойСклад."
     )
+
+def _human_error_from_exception(e: Exception) -> str:
+    # Ошибки HTTP от API МойСклад / Ozon
+    if isinstance(e, requests.HTTPError):
+        resp = e.response
+        status = resp.status_code if resp is not None else None
+        text = ""
+        data = None
+
+        if resp is not None:
+            text = resp.text or ""
+            try:
+                data = resp.json()
+            except Exception:
+                data = None
+
+        # Специальный случай: нет товара на складе (код 3007)
+        if status == 412 and data:
+            errors = data.get("errors") or []
+            if errors:
+                err_msg = errors[0].get("error") or errors[0].get("message") or ""
+                if "Нельзя отгрузить товар, которого нет на складе" in err_msg:
+                    return (
+                        "МойСклад: нельзя отгрузить товар, которого нет на складе "
+                        "(остаток по складу Ozon = 0 или меньше)."
+                    )
+                return f"МойСклад вернул ошибку 412: {err_msg}"
+
+        # Общий случай HTTP-ошибки
+        if data and isinstance(data, dict) and data.get("errors"):
+            parts = []
+            for err in data["errors"]:
+                msg = err.get("error") or err.get("message")
+                if msg:
+                    parts.append(msg)
+            if parts:
+                return f"HTTP {status}: " + "; ".join(parts)
+
+        return f"HTTP ошибка {status or ''} при обращении к API (подробности в логах)."
+
+    # Известный глюк TypeError (если ещё будет)
+    msg = str(e)
+    if "str' object does not support item assignment" in msg:
+        return (
+            "Внутренняя ошибка скрипта интеграции (TypeError: попытка изменить строку). "
+            "Нужно исправить логику формирования данных перед отправкой."
+        )
+
+    # Общий fallback
+    return f"Неизвестная ошибка обработки отправления: {msg}"
 
 
 def build_ms_positions_from_posting(posting: dict) -> list[dict]:
