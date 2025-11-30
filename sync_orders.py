@@ -103,7 +103,7 @@ def _human_error_from_exception(e: Exception) -> str:
 def _append_order_errors_to_file(rows: list[dict]) -> None:
     """
     Записываем ошибки обработки заказов в CSV.
-    Колонки: дата/время, номер заказа, артикул, название, причина.
+    Колонки: дата/время, номер заказа, артикул, название, причина ошибки.
     """
     if not rows:
         return
@@ -198,10 +198,6 @@ def build_ms_positions_from_posting(posting: dict) -> list[dict]:
             f"Артикулы: {', '.join(missing)}"
         )
         print("[ORDERS]", text.replace("\n", " | "))
-        try:
-            send_telegram_message(text)
-        except Exception:
-            pass
         return []
 
     return ms_positions
@@ -408,10 +404,6 @@ def sync_fbs_orders(dry_run: bool, limit: int = 300):
             )
 
             print("[ORDERS]", msg.replace("\n", " | "))
-            try:
-                send_telegram_message(msg)
-            except Exception:
-                pass
 
             error_rows.extend(_build_error_rows_for_posting(posting, reason))
 
