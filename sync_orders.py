@@ -2,29 +2,10 @@ import os
 import csv
 import json
 from datetime import datetime
-
 import requests
 from dotenv import load_dotenv
 
-from ozon_client import get_fbs_postings
-from ms_client import (
-    find_product_by_article,
-    create_customer_order,
-    find_customer_order_by_name,
-    update_customer_order_state,
-    clear_reserve_for_order,
-    create_demand_from_order,
-    # get_stock_by_assortment_href  # больше не используем
-)
-
-try:
-    from notifier import send_telegram_message
-except ImportError:
-    def send_telegram_message(text: str) -> bool:
-        print("Telegram notifier не доступен:", text)
-        return False
-
-
+# Загрузка переменных окружения
 load_dotenv()
 
 DRY_RUN_ORDERS = os.getenv("DRY_RUN_ORDERS", "true").lower() == "true"
@@ -34,25 +15,8 @@ ERRORS_FILE_PATH = os.path.join(
     "orders_errors.csv",
 )
 
-MS_STATE_AWAIT_PACK = os.getenv("MS_STATE_AWAIT_PACK")
-MS_STATE_AWAIT_SHIP = os.getenv("MS_STATE_AWAIT_SHIP")
-MS_STATE_DELIVERING = os.getenv("MS_STATE_DELIVERING")
-MS_STATE_DELIVERED = os.getenv("MS_STATE_DELIVERED")
-MS_STATE_CANCELLED = os.getenv("MS_STATE_CANCELLED")
-
-MS_ORGANIZATION_HREF = os.getenv("MS_ORGANIZATION_HREF")
-MS_AGENT_HREF = os.getenv("MS_AGENT_HREF")
-MS_STORE_HREF = os.getenv("MS_STORE_HREF")
-
-
-if not (MS_ORGANIZATION_HREF and MS_AGENT_HREF and MS_STORE_HREF):
-    raise RuntimeError(
-        "Не заданы MS_ORGANIZATION_HREF / MS_AGENT_HREF / MS_STORE_HREF. "
-        "Скопируйте meta.href из МойСклад."
-    )
-
 def _human_error_from_exception(e: Exception) -> str:
-    # Ошибки HTTP от API МойСклад / Ozon
+    """Функция для преобразования ошибок в читаемые сообщения для пользователя"""
     if isinstance(e, requests.HTTPError):
         resp = e.response
         status = resp.status_code if resp is not None else None
@@ -66,7 +30,6 @@ def _human_error_from_exception(e: Exception) -> str:
             except Exception:
                 data = None
 
-        # Специальный случай: нет товара на складе (код 3007)
         if status == 412 and data:
             errors = data.get("errors") or []
             if errors:
@@ -78,7 +41,6 @@ def _human_error_from_exception(e: Exception) -> str:
                     )
                 return f"МойСклад вернул ошибку 412: {err_msg}"
 
-        # Общий случай HTTP-ошибки
         if data and isinstance(data, dict) and data.get("errors"):
             parts = []
             for err in data["errors"]:
@@ -86,11 +48,10 @@ def _human_error_from_exception(e: Exception) -> str:
                 if msg:
                     parts.append(msg)
             if parts:
-                return f"HTTP {status}: " + "; ".join(parts)
+                return f"HTTP {status or ''}: " + "; ".join(parts)
 
         return f"HTTP ошибка {status or ''} при обращении к API (подробности в логах)."
 
-    # Известный глюк TypeError (если ещё будет)
     msg = str(e)
     if "str' object does not support item assignment" in msg:
         return (
@@ -98,269 +59,118 @@ def _human_error_from_exception(e: Exception) -> str:
             "Нужно исправить логику формирования данных перед отправкой."
         )
 
-    # Общий fallback
     return f"Неизвестная ошибка обработки отправления: {msg}"
 
+def _append_order_errors_to_file(rows: list[dict]) -> None:
+    """Записываем ошибку в CSV файл"""
+    if not rows:
+        return
 
-def build_ms_positions_from_posting(posting: dict) -> list[dict]:
-    """
-    Собираем позиции МС из одного отправления Ozon.
-    Если хотя бы один offer_id не найден — возвращаем пустой список.
-    """
+    file_exists = os.path.exists(ERRORS_FILE_PATH)
+
+    with open(ERRORS_FILE_PATH, "a", newline="", encoding="utf-8-sig") as f:
+        writer = csv.writer(f, delimiter=";")
+        if not file_exists:
+            writer.writerow(["Дата/время", "Номер заказа", "Артикул", "Название", "Причина ошибки"])
+
+        for r in rows:
+            writer.writerow([
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                r.get("posting_number", ""),
+                r.get("article", ""),
+                r.get("name", ""),
+                r.get("reason", ""),
+            ])
+
+def _build_error_rows_for_posting(posting: dict, reason: str) -> list[dict]:
+    """Строим строки для ошибки по одному заказу"""
+    posting_number = posting.get("posting_number", "")
     products = posting.get("products") or []
-    ms_positions = []
-    missing = []
 
-    for p in products:
-        offer_id = p.get("offer_id")
-        qty = p.get("quantity", 0)
-        if not offer_id or qty <= 0:
-            continue
+    rows: list[dict] = []
 
-        ms_product = find_product_by_article(offer_id)
-        if not ms_product:
-            missing.append(offer_id)
-            continue
-
-        ms_positions.append(
+    if products:
+        for p in products:
+            rows.append(
+                {
+                    "posting_number": posting_number,
+                    "article": p.get("offer_id") or "",
+                    "name": p.get("name") or "",
+                    "reason": reason,
+                }
+            )
+    else:
+        rows.append(
             {
-                "quantity": qty,
-                "ms_meta": ms_product["meta"],
-                "article": offer_id,
+                "posting_number": posting_number,
+                "article": "",
+                "name": "",
+                "reason": reason,
             }
         )
 
-    if missing:
-        text = (
-            "❗ Не найдены товары в МойСклад по артикулу из Ozon\n"
-            f"Отправление: {posting.get('posting_number')}\n"
-            f"Артикулы: {', '.join(missing)}"
-        )
-        print("[ORDERS]", text.replace("\n", " | "))
-        try:
-            send_telegram_message(text)
-        except Exception:
-            pass
-        return []
+    return rows
 
-    return ms_positions
+def is_discounted_product(ozon_product: dict) -> bool:
+    """Определяем, является ли товар уценённым на основе скидки или других характеристик"""
+    # Пример распознавания: если есть discount_price или sale_price и цена товара со скидкой меньше обычной цены
+    price = ozon_product.get('price', 0)
+    discounted_price = ozon_product.get('discount_price', 0)
+    
+    # Если у товара есть скидка и цена со скидкой меньше обычной цены, то товар уценён
+    if discounted_price and discounted_price < price:
+        return True
+    return False
 
-
-def build_customer_order_payload(posting: dict, ms_positions: list) -> dict:
-    """
-    Формируем payload для создания заказа в МойСклад.
-    name = номер отправления Ozon.
-    """
-    posting_number = posting.get("posting_number", "NO_NUMBER")
-
-    payload = {
-        "name": posting_number,
-        "description": "FBS → Auto-Mix",
-        "organization": {
-            "meta": {
-                "href": MS_ORGANIZATION_HREF,
-                "type": "organization",
-                "mediaType": "application/json",
-            }
-        },
-        "agent": {
-            "meta": {
-                "href": MS_AGENT_HREF,
-                "type": "counterparty",
-                "mediaType": "application/json",
-            }
-        },
-        "store": {
-            "meta": {
-                "href": MS_STORE_HREF,
-                "type": "store",
-                "mediaType": "application/json",
-            }
-        },
-        "positions": [],
-    }
-
-    for pos in ms_positions:
-        payload["positions"].append(
-            {
-                "quantity": pos["quantity"],
-                "assortment": {"meta": pos["ms_meta"]},
-                "reserve": pos["quantity"],
-            }
-        )
-
-    return payload
-
-
-def _find_existing_order_by_posting(posting_number: str) -> dict | None:
-    """
-    Ищем заказ:
-      1) по имени = posting_number
-      2) по старому формату OZON-<номер>
-    """
-    if not posting_number:
-        return None
-
-    order = find_customer_order_by_name(posting_number)
-    if order:
-        return order
-
-    return find_customer_order_by_name(f"OZON-{posting_number}")
-
-
-def process_posting(posting: dict, dry_run: bool):
+def process_posting(posting: dict, dry_run: bool = True):
+    """Обрабатываем отправление Ozon"""
     posting_number = posting.get("posting_number")
     status = posting.get("status")
-
     print(f"[ORDERS] Обработка {posting_number}, статус: {status}")
 
-    ms_positions = build_ms_positions_from_posting(posting)
-    if not ms_positions:
-        print(f"[ORDERS] {posting_number}: нет позиций в МС — пропуск.")
+    if status != "delivering":
+        print(f"[ORDERS] Статус не 'Доставляется' для {posting_number}, пропускаем.")
         return
 
-    existing = _find_existing_order_by_posting(posting_number)
+    # Получаем список товаров из заказа
+    products = posting.get("products", [])
+    for product in products:
+        offer_id = product.get("offer_id", "")
+        print(f"[MS] Найден в {offer_id}: {product.get('name')}")
 
-    # ================================
-    # awaiting_packaging → создать заказ, резерв
-    # ================================
-    if status == "awaiting_packaging":
-        if existing:
-            print(f"[ORDERS] Заказ {posting_number} уже существует.")
-            return
+        # Проверяем, уценён ли товар
+        if is_discounted_product(product):
+            print(f"[MS] Уценённый товар: {offer_id}, {product.get('name')}")
+            product['quantity'] = 1  # отправляем 1 ед.
 
-        print(f"[ORDERS] Создание заказа {posting_number}")
-        if dry_run:
-            print("[ORDERS] DRY_RUN_ORDERS=True — заказ НЕ создаётся.")
-            return
+        # Здесь будет логика для создания отгрузки и снятия резерва, если товар не уценён
+        try:
+            create_demand_from_order(posting_number)
+        except Exception as e:
+            reason = _human_error_from_exception(e)
+            print(f"[ORDERS] ❗ Ошибка обработки отправления {posting_number} | причина: {reason}")
+            
+            # Запись в CSV и Telegram
+            error_rows = _build_error_rows_for_posting(posting, reason)
+            _append_order_errors_to_file(error_rows)
 
-        payload = build_customer_order_payload(posting, ms_positions)
-        created = create_customer_order(payload)
-        if MS_STATE_AWAIT_PACK:
-            update_customer_order_state(created["meta"]["href"], MS_STATE_AWAIT_PACK)
-        print(f"[ORDERS] Заказ {posting_number} создан, статус 'Ожидают сборки'.")
-        return
+            msg = f"❗ Ошибка обработки отправления Ozon\nНомер отправления: {posting_number}\nПричина: {reason}"
+            send_telegram_message(msg)
 
-    # ================================
-    # awaiting_deliver → статус "Ожидают отгрузки"
-    # ================================
-    if status == "awaiting_deliver":
-        if not existing:
-            print(f"[ORDERS] Заказ {posting_number} не найден — создаём.")
-            if dry_run:
-                print("[ORDERS] DRY_RUN_ORDERS=True — создание пропущено.")
-                return
-            payload = build_customer_order_payload(posting, ms_positions)
-            existing = create_customer_order(payload)
-
-        print(f"[ORDERS] Перевод {posting_number} в 'Ожидают отгрузки'")
-        if dry_run:
-            print("[ORDERS] DRY_RUN_ORDERS=True — статус не меняем.")
-            return
-
-        if MS_STATE_AWAIT_SHIP:
-            update_customer_order_state(existing["meta"]["href"], MS_STATE_AWAIT_SHIP)
-
-        print(f"[ORDERS] {posting_number}: статус 'Ожидают отгрузки'.")
-        return
-
-    # ================================
-    # delivering → статус "Доставляются", снять резерв, создать отгрузку
-    # ================================
-    if status == "delivering":
-        if not existing:
-            print(f"[ORDERS] {posting_number} отсутствует — создаём перед отгрузкой.")
-            if dry_run:
-                print("[ORDERS] DRY_RUN_ORDERS=True — создание пропущено.")
-                return
-            payload = build_customer_order_payload(posting, ms_positions)
-            existing = create_customer_order(payload)
-
-        href = existing["meta"]["href"]
-
-        print(f"[ORDERS] {posting_number}: 'Доставляются', снимаем резерв и создаём отгрузку.")
-        if dry_run:
-            print("[ORDERS] DRY_RUN_ORDERS=True — действия не выполняются.")
-            return
-
-        if MS_STATE_DELIVERING:
-            update_customer_order_state(href, MS_STATE_DELIVERING)
-
-        clear_reserve_for_order(href)
-        create_demand_from_order(href)
-
-        # Уведомление об обнулении остатка отключено, т.к. /report/stock/all не даёт фильтрацию
-        print(f"[ORDERS] {posting_number}: резерв снят, отгрузка создана.")
-        return
-
-    # ================================
-    # cancelled → отмена
-    # ================================
-    if status == "cancelled":
-        if not existing:
-            print(f"[ORDERS] {posting_number}: заказ отсутствует, нечего отменять.")
-            return
-
-        href = existing["meta"]["href"]
-        print(f"[ORDERS] {posting_number}: отмена заказа.")
-        if dry_run:
-            print("[ORDERS] DRY_RUN_ORDERS=True — отмена не выполняется.")
-            return
-
-        clear_reserve_for_order(href)
-        if MS_STATE_CANCELLED:
-            update_customer_order_state(href, MS_STATE_CANCELLED)
-
-        print(f"[ORDERS] {posting_number}: резерв снят, статус 'Отменён'.")
-        return
-
-    # ================================
-    # delivered → доставлен
-    # ================================
-    if status == "delivered":
-        if not existing:
-            print(f"[ORDERS] {posting_number}: заказ отсутствует, статус delivered игнорируем.")
-            return
-
-        href = existing["meta"]["href"]
-        print(f"[ORDERS] {posting_number}: заказ доставлен, завершаем.")
-        if dry_run:
-            print("[ORDERS] DRY_RUN_ORDERS=True — статус не меняем.")
-            return
-
-        clear_reserve_for_order(href)
-        if MS_STATE_DELIVERED:
-            update_customer_order_state(href, MS_STATE_DELIVERED)
-
-        print(f"[ORDERS] {posting_number}: статус 'Доставлен', резерв снят.")
-        return
-
-    print(f"[ORDERS] Статус '{status}' пока не обрабатывается.")
-
-
-def sync_fbs_orders(dry_run: bool, limit: int = 3):
-    print(f"[ORDERS] Старт sync_fbs_orders, DRY_RUN_ORDERS={dry_run}")
-
-    data = get_fbs_postings(limit=limit)
-    postings = data.get("result", {}).get("postings", [])
-
-    print(f"[ORDERS] Найдено отправлений: {len(postings)}")
+def sync_fbs_orders(dry_run: bool = True, limit: int = 10):
+    """Основная функция для синхронизации заказов FBS"""
+    postings = get_ozon_orders(limit=limit)
+    error_rows: list[dict] = []
 
     for posting in postings:
         try:
             process_posting(posting, dry_run)
         except Exception as e:
+            reason = _human_error_from_exception(e)
+            posting_number = posting.get("posting_number")
+
             msg = (
                 "❗ Ошибка обработки отправления Ozon\n"
-                f"posting_number: {posting.get('posting_number')}\n"
-                f"error: {e!r}"
+                f"Номер отправления: {posting_number}\n"
+                f"Причина: {reason}"
             )
-            print("[ORDERS]", msg.replace("\n", " | "))
-            try:
-                send_telegram_message(msg)
-            except Exception:
-                pass
-
-
-if __name__ == "__main__":
-    sync_fbs_orders(dry_run=DRY_RUN_ORDERS, limit=3)
