@@ -125,6 +125,10 @@ def is_discounted_product(ozon_product: dict) -> bool:
         return True
     return False
 
+import datetime
+
+import datetime
+
 def get_ozon_orders(limit: int = 10):
     """Получаем заказы с Ozon"""
     url = f"{OZON_API_URL}posting/fbs/list"
@@ -133,10 +137,15 @@ def get_ozon_orders(limit: int = 10):
         "Api-Key": OZON_API_KEY,
         "Content-Type": "application/json"
     }
+
+    # Получаем текущую дату в формате YYYY-MM-DD
+    processed_at_from = datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
+
     payload = {
         "filter": {
             "status": "DELIVERING",  # Заказы в процессе доставки
-            "limit": limit
+            "limit": limit,
+            "processedAtFrom": processed_at_from  # Добавляем дату
         }
     }
     
