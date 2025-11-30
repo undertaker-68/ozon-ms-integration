@@ -202,8 +202,31 @@ async def send_report_to_telegram(file_path):
 def sync_fbs_orders(dry_run: bool, limit: int = 300):
     print(f"[ORDERS] Старт sync_fbs_orders, DRY_RUN_ORDERS={dry_run}")
 
-    data = get_fbs_postings(limit=limit)
-    postings = data.get("result", {}).get("postings", [])
+    postings: list[dict] = []
+
+    # --- Кабинет Ozon №1 (как раньше) ---
+    data1 = get_fbs_postings_ozon1(limit=limit)
+    p1 = data1.get("result", {}).get("postings", []) or []
+    for p in p1:
+        # помечаем источник, если вдруг потом пригодится
+        p.setdefault("_ozon_account", "ozon1")
+    postings.extend(p1)
+
+    # --- Кабинет Ozon №2 (если настроен и импорт прошёл) ---
+    if get_fbs_postings_ozon2 is not None:
+        try:
+            data2 = get_fbs_postings_ozon2(limit=limit)
+            p2 = data2.get("result", {}).get("postings", []) or []
+            for p in p2:
+                p.setdefault("_ozon_account", "ozon2")
+            postings.extend(p2)
+        except Exception as e:
+            msg = f"❗ Ошибка при получении отправлений из второго кабинета Ozon: {e!r}"
+            print("[ORDERS]", msg)
+            try:
+                send_telegram_message(msg)
+            except Exception:
+                pass
 
     print(f"[ORDERS] Найдено отправлений: {len(postings)}")
 
@@ -219,19 +242,22 @@ def sync_fbs_orders(dry_run: bool, limit: int = 300):
 
         # Пропускаем заказ, если он был создан до 30.11.2025
         if created_date and created_date < cutoff_date:
-            print(f"[ORDERS] Заказ {posting.get('posting_number')} создан до 30.11.2025, пропускаем.")
+            print(
+                f"[ORDERS] Заказ {posting.get('posting_number')} "
+                f"(источник={posting.get('_ozon_account')}) создан до 30.11.2025, пропускаем."
+            )
             continue  # Пропускаем этот заказ
 
         try:
+            # существующая логика обработки одного отправления
             process_posting(posting, dry_run)
         except Exception as e:
             reason = _human_error_from_exception(e)
-            posting_number = posting.get("posting_number")
             error_rows.extend(_build_error_rows_for_posting(posting, reason))
 
     # После обработки заказов — отправляем файл с ошибками в Telegram
     _append_order_errors_to_file(error_rows)
-    asyncio.run(send_report_to_telegram(ERRORS_FILE_PATH))  # Асинхронно отправляем файл
+    asyncio.run(send_report_to_telegram(ERRORS_FILE_PATH))
 
 if __name__ == "__main__":
     print("Запуск синхронизации заказов Ozon с МойСклад...")
