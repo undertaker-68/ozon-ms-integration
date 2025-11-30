@@ -134,10 +134,13 @@ def get_ozon_orders(limit: int = 10):
         "Content-Type": "application/json"
     }
     payload = {
-        "limit": limit,
+        "filter": {
+            "status": "DELIVERING",  # Статус заказа, например 'DELIVERING' (доставляется)
+            "limit": limit
+        }
     }
     try:
-        # Используем POST, а не GET
+        # Отправляем POST запрос с правильным параметром
         response = requests.post(url, headers=headers, json=payload)
         response.raise_for_status()
         print(f"Получены заказы: {len(response.json().get('result', []))}")
