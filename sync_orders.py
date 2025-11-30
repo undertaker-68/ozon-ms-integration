@@ -133,11 +133,12 @@ def get_ozon_orders(limit: int = 10):
         "Api-Key": OZON_API_KEY,
         "Content-Type": "application/json"
     }
-    params = {
+    payload = {
         "limit": limit,
     }
     try:
-        response = requests.get(url, headers=headers, params=params)
+        # Используем POST, а не GET
+        response = requests.post(url, headers=headers, json=payload)
         response.raise_for_status()
         print(f"Получены заказы: {len(response.json().get('result', []))}")
         return response.json().get('result', [])
