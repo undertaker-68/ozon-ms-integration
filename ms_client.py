@@ -319,23 +319,38 @@ def update_customer_order_state(order_meta_href: str, state_meta_href: str) -> d
 
 def clear_reserve_for_order(order_meta_href: str) -> dict:
     """
-    Снять резерв по всем позициям заказа.
+    Снять резерв по всем позициям заказа покупателя.
     """
+    # 1. Читаем сам заказ
     r = requests.get(order_meta_href, headers=HEADERS, timeout=30)
     r.raise_for_status()
     order = r.json()
 
-    positions = order.get("positions", [])
-    for pos in positions:
+    # 2. Получаем href позиций
+    pos_meta = order.get("positions", {}).get("meta", {}).get("href")
+    if not pos_meta:
+        print("[MS] Нет позиций для снятия резерва")
+        return order
+
+    # 3. Загружаем позиции заказа
+    r_pos = requests.get(pos_meta, headers=HEADERS, timeout=30)
+    r_pos.raise_for_status()
+    pos_list = r_pos.json().get("rows", [])
+
+    # 4. Обнуляем reserve в каждой позиции
+    for pos in pos_list:
         pos["reserve"] = 0
 
-    order["positions"] = positions
+        # отправляем PUT для каждой позиции
+        pos_href = pos["meta"]["href"]
+        r_put = requests.put(pos_href, headers=HEADERS, json=pos, timeout=30)
+        if r_put.status_code >= 400:
+            print(f"[MS ERROR] clear_reserve pos PUT status={r_put.status_code} body={r_put.text[:300]}")
+        r_put.raise_for_status()
 
-    r_put = requests.put(order_meta_href, headers=HEADERS, json=order, timeout=30)
-    if r_put.status_code >= 400:
-        print(f"[MS ERROR] clear_reserve_for_order status={r_put.status_code} body={r_put.text[:500]}")
-    r_put.raise_for_status()
-    return r_put.json()
+    # 5. Возвращаем результат
+    print(f"[MS] Резерв снят, позиций обработано: {len(pos_list)}")
+    return order
 
 
 def create_demand_from_order(order_meta_href: str) -> dict:
