@@ -10,6 +10,7 @@ except ImportError:
         print("Telegram notifier не доступен:", text)
         return False
 
+
 load_dotenv()
 
 CLIENT_ID = os.getenv("OZON2_CLIENT_ID")
@@ -29,8 +30,8 @@ OZON_API_URL = "https://api-seller.ozon.ru"
 
 def get_fbs_postings(limit: int = 3) -> dict:
     """
-    Получение FBS-отправлений для ВТОРОГО кабинета Ozon
-    за последние 7 дней. Логика та же, что и в основном ozon_client.
+    Получение FBS-отправлений из ВТОРОГО кабинета Ozon (Trail Gear)
+    за последние 7 дней. Логика аналогична основному ozon_client.get_fbs_postings.
     """
     url = f"{OZON_API_URL}/v3/posting/fbs/list"
 
@@ -45,8 +46,8 @@ def get_fbs_postings(limit: int = 3) -> dict:
         "delivered",
     ]
 
-    all_postings = []
-    seen_numbers = set()
+    all_postings: list[dict] = []
+    seen_numbers: set[str] = set()
 
     for status in STATUSES:
         if len(all_postings) >= limit:
@@ -83,7 +84,7 @@ def get_fbs_postings(limit: int = 3) -> dict:
             r.raise_for_status()
 
         data = r.json()
-        postings = data.get("result", {}).get("postings", [])
+        postings = data.get("result", {}).get("postings", []) or []
 
         for p in postings:
             pn = p.get("posting_number")
@@ -91,12 +92,12 @@ def get_fbs_postings(limit: int = 3) -> dict:
                 continue
             seen_numbers.add(pn)
 
-            # Помечаем, что это второй кабинет
-            p["_ozon_account"] = "ozon2"
+            # Помечаем, что это Trail Gear
+            p["_ozon_account"] = "trail_gear"
 
             all_postings.append(p)
             if len(all_postings) >= limit:
                 break
 
-    print(f"[OZON2] Получено FBS-отправлений: {len(all_postings)}")
+    print(f"[OZON2] Получено FBS-отправлений (Trail Gear): {len(all_postings)}")
     return {"result": {"postings": all_postings}}
