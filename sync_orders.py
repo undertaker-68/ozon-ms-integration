@@ -11,7 +11,7 @@ load_dotenv()
 DRY_RUN_ORDERS = os.getenv("DRY_RUN_ORDERS", "true").lower() == "true"
 
 # Добавляем параметры для работы с Ozon API
-OZON_API_URL = "https://api-seller.ozon.ru/v2/"  # Окончательная версия API Ozon
+OZON_API_URL = "https://api-seller.ozon.ru/v3/"  # Окончательная версия API Ozon
 OZON_CLIENT_ID = os.getenv("OZON_CLIENT_ID")  # Получить из переменной окружения
 OZON_API_KEY = os.getenv("OZON_API_KEY")  # Получить из переменной окружения
 
