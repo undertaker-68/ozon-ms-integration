@@ -4,7 +4,7 @@ from datetime import datetime
 import requests
 import asyncio
 from dotenv import load_dotenv
-from ozon_client import get_fbs_postings
+from ozon_client import get_fbs_postings as get_fbs_postings_ozon1
 from ms_client import (
     find_product_by_article,
     create_customer_order,
@@ -18,6 +18,10 @@ from telegram import Bot
 try:
     from notifier import send_telegram_message
 except ImportError:
+    from ozon_client2 import get_fbs_postings as get_fbs_postings_ozon2
+except ImportError:
+    get_fbs_postings_ozon2 = None
+    
     def send_telegram_message(text: str) -> bool:
         print("Telegram notifier не доступен:", text)
         return False
