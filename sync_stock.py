@@ -1,7 +1,6 @@
 import os
 import csv
 import tempfile
-from datetime import datetime
 from dotenv import load_dotenv
 
 from ms_client import get_stock_all
@@ -90,16 +89,12 @@ def build_ozon_stocks_from_ms() -> tuple[list[dict], int, list[dict]]:
     for ms_store_id, ozon_wh_id in WAREHOUSE_MAP.items():
         print(f"[STOCK] Читаем остатки из МС: store_id={ms_store_id} → Ozon warehouse_id={ozon_wh_id}")
 
-        rows = _fetch_ms_stock_rows_for_store(ms_store_id, limit=1000)
+        rows = _fetch_ms_stock_rows_for_store(ms_store_id)
 
         for row in rows:
             article = row.get("article")
             if not article:
                 continue
-
-            # 🔍 Debug по 10561
-            if article == "10561":
-                print("[DEBUG 10561] строка из МойСклад:", row)
 
             name = (
                 row.get("name")
@@ -154,7 +149,6 @@ def build_ozon_stocks_from_ms() -> tuple[list[dict], int, list[dict]]:
             "name": names_by_article.get(s["offer_id"], ""),
             "article": s["offer_id"],
             "stock": s["stock"],
-            "warehouse_id": s["warehouse_id"],
         }
         for s in stocks
     ]
@@ -209,7 +203,6 @@ def main(dry_run: bool | None = None) -> None:
     print(f"[STOCK] Передаём в Ozon позиций: {len(stocks)}")
     print(f"[STOCK] Строк в отчёте CSV: {len(report_rows)}")
 
-    # 📌 ВСЕГДА отправляем CSV в Telegram
     _send_stock_report_file(report_rows)
 
     if dry_run:
