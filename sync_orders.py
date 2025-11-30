@@ -186,6 +186,12 @@ def sync_fbs_orders(dry_run: bool = True, limit: int = 10):
 
     # После обработки всех отправлений — записываем CSV
     _append_order_errors_to_file(error_rows)
+def get_ozon_orders(limit: int = 10):
+    print(f"Запрос на получение {limit} заказов с Ozon...")
+    # Код для получения заказов с Ozon
+    response = requests.get("URL для получения заказов")  # Укажи реальный URL
+    print("Ответ от Ozon:", response.json())  # Проверим, что получаем
+    return response.json()
 
 if __name__ == "__main__":
     print("Запуск синхронизации заказов...")
