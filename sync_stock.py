@@ -121,29 +121,17 @@ def build_ozon_stocks_from_ms() -> tuple[list[dict], int, list[dict]]:
                 names_by_article[article] = name
 
     if not candidates:
-        return [], 0, []
+    return [], 0, []
 
-    offer_ids = list({art for art, _, _ in candidates})
-    states = get_products_state_by_offer_ids(offer_ids)
+stocks: list[dict] = []
+skipped_not_found = 0  # оставляем для совместимости с сигнатурой
 
-    stocks: list[dict] = []
-    skipped_not_found = 0
-
-    for article, stock, ozon_wh_id in candidates:
-        state = states.get(article)
-
-        if state is None:
-            skipped_not_found += 1
-            continue
-
-        if state != "ACTIVE":
-            continue
-
-        stocks.append({
-            "offer_id": article,
-            "stock": stock,
-            "warehouse_id": ozon_wh_id,
-        })
+for article, stock, ozon_wh_id in candidates:
+    stocks.append({
+        "offer_id": article,
+        "stock": stock,
+        "warehouse_id": ozon_wh_id,
+    })
 
     report_rows = [
         {
