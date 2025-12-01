@@ -1,6 +1,7 @@
 import os
 import csv
 import tempfile
+import time
 from dotenv import load_dotenv
 
 from ms_client import get_stock_all
@@ -23,29 +24,32 @@ load_dotenv()
 
 DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
 
-IGNORE_STOCK_OFFERS = set(
-    offer.strip() for offer in os.getenv("IGNORE_STOCK_OFFERS", "").split(",") if offer.strip()
-)
-
-
 # ---------------------
-#  НОРМАЛИЗАЦИЯ АРТИКУЛОВ
+#  НОРМАЛИЗАЦИЯ АРТИКУЛОВ (RU → EN)
 # ---------------------
 
-# Замена русских букв на английские
 ARTICLE_TRANSLATION = str.maketrans({
     "А": "A", "В": "B", "Е": "E", "К": "K", "М": "M",
     "Н": "H", "О": "O", "Р": "P", "С": "C", "Т": "T",
     "У": "Y", "Х": "X",
-
     "а": "a", "в": "b", "е": "e", "к": "k", "м": "m",
     "н": "h", "о": "o", "р": "p", "с": "c", "т": "t",
     "у": "y", "х": "x",
 })
 
+
 def normalize_article(article: str) -> str:
-    """Приводим артикула к единой раскладке."""
+    """Привести артикул к единой раскладке для сопоставления с Ozon."""
+    if not isinstance(article, str):
+        article = str(article)
     return article.translate(ARTICLE_TRANSLATION).strip()
+
+
+IGNORE_STOCK_OFFERS = set(
+    normalize_article(offer.strip())
+    for offer in os.getenv("IGNORE_STOCK_OFFERS", "").split(",")
+    if offer.strip()
+)
 
 
 # ---------------------
@@ -67,6 +71,7 @@ def _parse_warehouse_map() -> dict[str, int]:
             except Exception:
                 print(f"[WARN] Неверный формат пары: {pair}")
 
+    # старый вариант для совместимости
     if not warehouse_map:
         ms_old = os.getenv("MS_OZON_STORE_ID")
         wh_old = os.getenv("OZON_WAREHOUSE_ID")
@@ -112,22 +117,17 @@ def _fetch_ms_stock_rows_for_store(ms_store_id: str, limit: int = 1000) -> list[
 
 
 # ---------------------
-#  ФИЛЬТРАЦИЯ + НОРМА АРТИКУЛОВ
+#  СБОР ОСТАТКОВ + ФИЛЬТРАЦИЯ ПО СТАТУСАМ OZON
 # ---------------------
 
-def _is_archive_or_deleted(row: dict) -> bool:
-    """Не используем товары «В архиве» или «Сняты с продажи»."""
-    assortment = row.get("assortment") or {}
-    a_state = (assortment.get("archived") or False)
-    status = (assortment.get("status") or "").lower().strip()
-
-    return (
-        a_state is True
-        or status in ("archived", "removed", "discontinued", "snyat_s_prodazhi", "снят с продажи", "снят с продаж")
-    )
-
-
 def build_ozon_stocks_from_ms() -> tuple[list[dict], int, list[dict]]:
+    """Читаем остатки из МойСклад и фильтруем по статусам товаров в Ozon.
+
+    Возвращаем:
+      stocks         – список для API /v2/products/stocks
+      skipped_count  – сколько позиций отфильтровано по статусам
+      report_rows    – строки для CSV-отчёта
+    """
     candidates: list[tuple[str, int, int]] = []
     names_by_article: dict[str, str] = {}
 
@@ -137,17 +137,13 @@ def build_ozon_stocks_from_ms() -> tuple[list[dict], int, list[dict]]:
         rows = _fetch_ms_stock_rows_for_store(ms_store_id)
 
         for row in rows:
-
-            # ❌ Пропускаем архив / сняты с продажи
-            if _is_archive_or_deleted(row):
-                continue
-
             article_raw = row.get("article")
             if not article_raw:
                 continue
 
-            # ✔️ нормализуем артикул
             article = normalize_article(article_raw)
+            if not article:
+                continue
 
             if article in IGNORE_STOCK_OFFERS:
                 continue
@@ -175,35 +171,45 @@ def build_ozon_stocks_from_ms() -> tuple[list[dict], int, list[dict]]:
     if not candidates:
         return [], 0, []
 
-    # ============ ФИЛЬТРАЦИЯ ПО СТАТУСАМ OZON (оба кабинета) ============
+    # ---------- ФИЛЬТРАЦИЯ ПО СТАТУСАМ ТОВАРОВ В OZON (оба кабинета) ----------
 
-    # нормализованный список offer_id
-    offer_ids = [c[0] for c in candidates]
+    # Уникальный список артикулов
+    offer_ids = sorted({c[0] for c in candidates})
 
-    # статусы первого кабинета
-    from ozon_client import get_products_state_by_offer_ids as ozon1_states_fetch
-    ozon1_states = ozon1_states_fetch(offer_ids) or []
+    # Первый кабинет (Auto-MiX)
+    try:
+        ozon1_states = get_products_state_by_offer_ids(offer_ids) or []
+    except Exception as e:
+        print(f"[STOCK] Ошибка получения статусов товаров в первом кабинете Ozon: {e!r}")
+        ozon1_states = []
 
-    # статусы второго кабинета
-    from ozon_client2 import get_products_state_by_offer_ids as ozon2_states_fetch
-    ozon2_states = ozon2_states_fetch(offer_ids) or []
+    # Второй кабинет (Trail Gear) – функция должна быть добавлена в ozon_client2
+    try:
+        from ozon_client2 import get_products_state_by_offer_ids as get_products_state_by_offer_ids_ozon2
+        ozon2_states = get_products_state_by_offer_ids_ozon2(offer_ids) or []
+    except Exception as e:
+        print(f"[STOCK] Не удалось получить статусы товаров во втором кабинете Ozon: {e!r}")
+        ozon2_states = []
 
-    # Создаём карту offer_id → state (берём самое «жёсткое» состояние)
-    status_map = {}
+    # Приоритет статусов: archived > disabled > unavailable > available > остальное
+    status_priority: dict[str | None, int] = {
+        "archived": 3,
+        "disabled": 2,
+        "unavailable": 1,
+        "available": 0,
+        "": -1,
+        None: -1,
+    }
 
-    def merge_state(offer_id, state):
-        if not offer_id or not state:
+    status_map: dict[str, str | None] = {}
+
+    def merge_state(offer_id: str | None, state: str | None) -> None:
+        if not offer_id:
             return
-    # Приоритет: archived > disabled > unavailable > available
-        prior = {
-            "archived": 3,
-            "disabled": 2,
-            "unavailable": 1,
-            "available": 0,
-            None: -1,
-        }
-        prev = status_map.get(offer_id)
-        if prev is None or prior[state] > prior.get(prev, -1):
+        prev_state = status_map.get(offer_id)
+        cur_pri = status_priority.get(state, -1)
+        prev_pri = status_priority.get(prev_state, -1)
+        if prev_state is None or cur_pri > prev_pri:
             status_map[offer_id] = state
 
     for item in ozon1_states:
@@ -212,21 +218,21 @@ def build_ozon_stocks_from_ms() -> tuple[list[dict], int, list[dict]]:
     for item in ozon2_states:
         merge_state(item.get("offer_id"), item.get("state"))
 
-    # Теперь фильтруем кандидатов
-    filtered_candidates = []
-    for article, stock, wh in candidates:
+    filtered_candidates: list[tuple[str, int, int]] = []
+    skipped_not_allowed = 0
+
+    for article, stock, ozon_wh_id in candidates:
         state = status_map.get(article, "available")
         if state in ("archived", "disabled", "unavailable"):
-            # не включаем
+            skipped_not_allowed += 1
             continue
-        filtered_candidates.append((article, stock, wh))
+        filtered_candidates.append((article, stock, ozon_wh_id))
 
     candidates = filtered_candidates
-# ============================================================
+
+    # ---------- Формируем итоговые данные для выгрузки и отчёта ----------
 
     stocks: list[dict] = []
-    skipped_not_found = 0
-
     for article, stock, ozon_wh_id in candidates:
         stocks.append({
             "offer_id": article,
@@ -243,8 +249,7 @@ def build_ozon_stocks_from_ms() -> tuple[list[dict], int, list[dict]]:
         for s in stocks
     ]
 
-    return stocks, skipped_not_found, report_rows
-
+    return stocks, skipped_not_allowed, report_rows
 
 
 # ---------------------
@@ -273,12 +278,15 @@ def _send_stock_report_file(report_rows: list[dict]) -> None:
                 ])
 
         ok = send_telegram_document(tmp_path, caption="Остатки Ozon (оба кабинета)")
-        print(f"[STOCK] CSV отправлен: {tmp_path}" if ok else f"[STOCK] Ошибка отправки CSV: {tmp_path}")
+        if ok:
+            print(f"[STOCK] CSV отправлен: {tmp_path}")
+        else:
+            print(f"[STOCK] Ошибка отправки CSV: {tmp_path}")
 
     finally:
         try:
             os.remove(tmp_path)
-        except:
+        except Exception:
             pass
 
 
@@ -299,7 +307,7 @@ def main(dry_run: bool | None = None) -> None:
 
     stocks, skipped, report_rows = build_ozon_stocks_from_ms()
 
-    print(f"[STOCK] Пропущено (нет в Ozon): {skipped}")
+    print(f"[STOCK] Пропущено (по статусам Ozon): {skipped}")
     print(f"[STOCK] Передаём в Ozon позиций: {len(stocks)}")
     print(f"[STOCK] Строк в отчёте CSV: {len(report_rows)}")
 
@@ -316,6 +324,10 @@ def main(dry_run: bool | None = None) -> None:
     # Первый кабинет (Auto-MiX)
     update_stocks(stocks)
 
+    # Небольшая пауза перед обновлением второго кабинета,
+    # чтобы чуть снизить риск TOO_MANY_REQUESTS
+    time.sleep(1.5)
+
     # Второй кабинет (Trail Gear)
     try:
         update_stocks_ozon2(stocks)
@@ -324,7 +336,7 @@ def main(dry_run: bool | None = None) -> None:
         print(msg)
         try:
             send_telegram_message(msg)
-        except:
+        except Exception:
             pass
 
 
