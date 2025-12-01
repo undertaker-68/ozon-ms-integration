@@ -38,11 +38,15 @@ def update_stocks(stocks: list) -> dict:
         "warehouse_id": 22254230484000
     }
 
-    Ozon ограничивает размер массива stocks: 1..100 элементов.
-    Поэтому отправляем батчами по 100.
+    Отправляем батчами по 100 позиций.
+    Ошибки:
+      - в логи выводим все
+      - в Telegram:
+          * реальные ошибки (кроме TOO_MANY_REQUESTS) — только первые N строк
+          * TOO_MANY_REQUESTS — короткое резюме, без простыни
     """
     if not stocks:
-        print("[OZON2] update_stocks: передан пустой список stocks, запрос к Ozon не отправляется.")
+        print("[OZON2] update_stocks: передан пустой список stocks, запрос к Ozon2 не отправляется.")
         return {"result": []}
 
     url = f"{OZON_API_URL}/v2/products/stocks"
@@ -98,40 +102,72 @@ def update_stocks(stocks: list) -> dict:
                 pass
             raise RuntimeError("Некорректный JSON от Ozon2 при обновлении остатков")
 
-        result_items = data.get("result", [])
+        result_items = data.get("result", []) or []
         all_results.extend(result_items)
 
-        errors_summary = []
+        # Собираем ошибки: отдельно считаем TOO_MANY_REQUESTS,
+        # отдельно — остальные (для краткого отчёта)
+        errors_summary: list[str] = []
+        too_many_requests_count = 0
+
         for item in result_items:
             offer_id = item.get("offer_id")
             errors = item.get("errors") or []
-            if errors:
-                any_errors = True
-                for err in errors:
-                    code = err.get("code")
-                    message = err.get("message")
-                    msg = (
-                        "❗ Ошибка обновления остатка в Ozon2 по товару\n"
-                        f"offer_id: {offer_id}\n"
-                        f"code: {code}\n"
-                        f"message: {message}"
-                    )
-                    print(msg)
+            if not errors:
+                continue
+
+            any_errors = True
+
+            for err in errors:
+                code = err.get("code")
+                message = err.get("message")
+
+                msg = (
+                    "❗ Ошибка обновления остатка в Ozon2 по товару\n"
+                    f"offer_id: {offer_id}\n"
+                    f"code: {code}\n"
+                    f"message: {message}"
+                )
+                # Полный текст — в логи
+                print(msg)
+
+                if code == "TOO_MANY_REQUESTS":
+                    too_many_requests_count += 1
+                else:
                     errors_summary.append(msg)
 
+        # Краткое сообщение по "настоящим" ошибкам (кроме TOO_MANY_REQUESTS)
         if errors_summary:
+            MAX_LINES = 20  # чтобы сообщение не стало слишком длинным
+            trimmed = errors_summary[:MAX_LINES]
+
+            text = (
+                f"⚠ Ошибки при обновлении остатков в Ozon2 "
+                f"(батч {batch_num}/{total_batches}). "
+                f"Показываю первые {len(trimmed)} из {len(errors_summary)}:\n\n"
+                + "\n\n".join(trimmed)
+            )
+
+            try:
+                send_telegram_message(text)
+            except Exception as te:
+                print("Ошибка отправки уведомления в Telegram (Ozon2 errors):", te)
+
+        # Отдельное короткое сообщение по TOO_MANY_REQUESTS
+        if too_many_requests_count:
             try:
                 send_telegram_message(
-                    "⚠ Ошибки при обновлении остатков в Ozon2 "
-                    f"(батч {batch_num}/{total_batches}):\n\n" + "\n\n".join(errors_summary)
+                    f"⚠ Ozon2 вернул TOO_MANY_REQUESTS при обновлении остатков: "
+                    f"{too_many_requests_count} позиций (батч {batch_num}/{total_batches}). "
+                    f"Обычно это значит, что остатки обновляются слишком часто."
                 )
-            except Exception:
-                pass
+            except Exception as te:
+                print("Ошибка отправки уведомления в Telegram (TOO_MANY_REQUESTS):", te)
 
     if not any_errors:
         print(f"[OZON2] Обновление остатков завершено, ошибок нет. Всего позиций: {len(all_results)}")
     else:
-        print("[OZON2] Обновление остатков завершено с ошибками, подробности выше/в Telegram.")
+        print("[OZON2] Обновление остатков завершено с ошибками, подробности см. выше и в Telegram.")
 
     return {"result": all_results}
 
