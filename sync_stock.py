@@ -231,7 +231,7 @@ def main(dry_run: bool | None = None) -> None:
 
     _send_stock_report_file(report_rows)
 
-        if dry_run:
+    if dry_run:
         print("[STOCK] DRY_RUN: обновление в Ozon не выполняется.")
         return
 
