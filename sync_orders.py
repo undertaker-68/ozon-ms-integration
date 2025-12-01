@@ -392,16 +392,16 @@ def sync_fbs_orders(dry_run: bool, limit: int = 300):
     errors_trail: list[dict] = []
 
     for posting in postings:
-        # Получаем дату создания заказа
-        created_date_str = posting.get("created")
-        created_date = None
+            # Получаем дату создания заказа из поля created_at (Ozon FBS API)
+    created_date_str = posting.get("created_at") or posting.get("created") or posting.get("in_process_at")
+    created_date = None
 
-        if created_date_str:
-            # безопасно отрезаем только дату YYYY-MM-DD
-            try:
-                created_date = datetime.strptime(created_date_str[:10], "%Y-%m-%d")
-            except Exception:
-                created_date = None
+    if created_date_str:
+        # Берём только дату YYYY-MM-DD, игнорируя время и часовой пояс
+        try:
+            created_date = datetime.strptime(created_date_str[:10], "%Y-%m-%d")
+        except Exception:
+            created_date = None
 
         # Пропускаем заказ, если он был создан до 01.12.2025
         if created_date and created_date < cutoff_date:
