@@ -7,11 +7,11 @@ load_dotenv()
 
 BASE_URL = "https://api-seller.ozon.ru"
 
+
 def fetch_info(headers, offer_ids, label):
     payload = {
         "offer_id": offer_ids,
-        "product_id": [],
-        "sku": []
+        # НИЧЕГО лишнего — только offer_id
     }
     resp = requests.post(
         BASE_URL + "/v3/product/info/list",
@@ -21,29 +21,45 @@ def fetch_info(headers, offer_ids, label):
     )
     print(f"\n=== {label} ===")
     print("HTTP:", resp.status_code)
+
     try:
         data = resp.json()
     except Exception:
-        print(resp.text)
+        print("RAW TEXT:", resp.text[:2000])
         return
 
-    # Аккуратно сокращаем вывод
-    items = data.get("items", [])
+    print("TOP-LEVEL KEYS:", list(data.keys()))
+
+    # В разных версиях API бывает items или result
+    items = data.get("items") or data.get("result") or []
+
+    print(f"items count: {len(items)}")
+
     for item in items:
-        print("\noffer_id:", item.get("offer_id"))
+        oid = item.get("offer_id")
+        if oid not in offer_ids:
+            continue
+
+        print("\n------ ITEM ------")
+        print("offer_id:", item.get("offer_id"))
         print("name:", item.get("name"))
         print("is_archived:", item.get("is_archived"))
         print("is_autoarchived:", item.get("is_autoarchived"))
-        statuses = item.get("statuses", {})
-        print("statuses.status:", statuses.get("status"))
-        print("statuses.status_name:", statuses.get("status_name"))
-        print("statuses.status_description:", statuses.get("status_description"))
-        # Если можешь, оставь ещё полный кусок для проблемного товара:
+
+        statuses = item.get("statuses") or {}
+        print("STATUSES RAW:", statuses)
+
+        # На всякий случай выведем state/status, если они сверху лежат
+        print("item.state:", item.get("state"))
+        print("item.status:", item.get("status"))
+
+        # И можешь для проблемных товаров раскомментировать:
         # print(json.dumps(item, ensure_ascii=False, indent=2))
 
 
 def main():
-    offer_ids = ["VW12"]  # сюда можно добавить ещё проблемные offer_id
+    # сюда можно добавить ещё проблемные offer_id
+    offer_ids = ["VW12"]
 
     headers1 = {
         "Client-Id": os.getenv("OZON_CLIENT_ID"),
