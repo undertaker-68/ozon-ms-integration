@@ -27,6 +27,57 @@ HEADERS = {
 
 OZON_API_URL = "https://api-seller.ozon.ru"
 
+def get_products_state_by_offer_ids(offer_ids):
+    """
+    Возвращает словарь {offer_id: state} для переданных offer_id во втором кабинете.
+    Использует /v3/product/info/list.
+      - ARCHIVED, если is_archived или is_autoarchived = True
+      - ACTIVE  иначе
+      - None   если товар не найден
+    """
+    if not offer_ids:
+        return {}
+
+    url = f"{OZON_API_URL}/v3/product/info/list"
+    BATCH_SIZE = 1000
+    result: dict[str, str | None] = {}
+
+    for i in range(0, len(offer_ids), BATCH_SIZE):
+        batch = offer_ids[i:i + BATCH_SIZE]
+        body = {"offer_id": batch}
+
+        r = requests.post(url, json=body, headers=HEADERS, timeout=30)
+
+        if r.status_code != 200:
+            msg = (
+                "❗ Ошибка Ozon2 /v3/product/info/list\n"
+                f"HTTP {r.status_code}\n"
+                f"{r.text[:2000]}"
+            )
+            print(msg)
+            try:
+                send_telegram_message(msg)
+            except Exception:
+                pass
+            r.raise_for_status()
+
+        data = r.json()
+        items = data.get("items") or data.get("result") or []
+
+        for item in items:
+            oid = item.get("offer_id")
+            if not oid:
+                continue
+            is_archived = bool(item.get("is_archived")) or bool(item.get("is_autoarchived"))
+            state = "ARCHIVED" if is_archived else "ACTIVE"
+            result[oid] = state
+
+    for oid in offer_ids:
+        if oid not in result:
+            result[oid] = None
+
+    return result
+
 def update_stocks(stocks: list) -> dict:
     """
     Обновление остатков в Ozon (кабинет Trail Gear).
