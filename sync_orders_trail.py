@@ -234,10 +234,12 @@ def process_posting(posting: dict, dry_run: bool) -> None:
     if not ms_positions:
         raise RuntimeError("Не удалось сопоставить ни одной позиции с товарами МойСклад")
 
-    positions_payload = [
+        positions_payload = [
         {
             "quantity": pos["quantity"],
-            "assortment": pos["ms_meta"],
+            "assortment": {
+                "meta": pos["ms_meta"],
+            },
         }
         for pos in ms_positions
     ]
