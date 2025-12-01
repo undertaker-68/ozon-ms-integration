@@ -47,9 +47,8 @@ if not (MS_ORGANIZATION_HREF and MS_AGENT_HREF and MS_STORE_HREF):
 # Отдельный файл ошибок для Trail Gear, чтобы не мешать с первым кабинетом
 ERRORS_FILE_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
-    "orders_errors_trail.csv",
+    "orders_errors.csv",
 )
-
 
 def _human_error_from_exception(e: Exception) -> str:
     if isinstance(e, requests.HTTPError):
@@ -155,9 +154,6 @@ def _build_error_rows_for_posting(posting: dict, reason: str) -> list[dict]:
 
 
 def build_ms_positions_from_posting(posting: dict) -> list[dict]:
-    """
-    Собираем позиции для заказа МойСклад по товарам из отправления Ozon.
-    """
     products = posting.get("products") or []
     ms_positions = []
     missing = []
@@ -188,10 +184,6 @@ def build_ms_positions_from_posting(posting: dict) -> list[dict]:
             f"Артикулы: {', '.join(missing)}"
         )
         print("[ORDERS TG]", text.replace("\n", " | "))
-        try:
-            send_telegram_message(text)
-        except Exception:
-            pass
 
     return ms_positions
 
