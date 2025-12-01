@@ -158,56 +158,44 @@ def build_ozon_stocks_from_ms() -> tuple[list[dict], int, list[dict]]:
 
 def _send_stock_report_file(report_rows: list[dict]) -> None:
     """
-    Отправляем ДВА CSV-файла в Telegram:
-      - Остатки Auto-MiX
-      - Остатки Trail Gear
-    Содержимое одинаковое, подписи разные.
+    Отправляем ОДИН CSV-файл в Telegram —
+    общий отчёт по остаткам для обоих кабинетов.
     """
     if not report_rows:
         print("[STOCK] Нет данных — CSV не создан.")
         return
 
-    fd1, path_auto = tempfile.mkstemp(prefix="ozon_stock_auto_", suffix=".csv")
-    os.close(fd1)
-    fd2, path_trail = tempfile.mkstemp(prefix="ozon_stock_trail_", suffix=".csv")
-    os.close(fd2)
+    fd, tmp_path = tempfile.mkstemp(prefix="ozon_stock_", suffix=".csv")
+    os.close(fd)
 
     try:
-        # Заполняем оба файла одинаковыми данными
-        for path in (path_auto, path_trail):
-            with open(path, "w", newline="", encoding="utf-8-sig") as f:
-                writer = csv.writer(f, delimiter=";")
-                writer.writerow(["№", "Наименование", "Артикул", "Кол-во"])
+        with open(tmp_path, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.writer(f, delimiter=";")
+            writer.writerow(["№", "Наименование", "Артикул", "Кол-во"])
 
-                for idx, row in enumerate(report_rows, start=1):
-                    writer.writerow(
-                        [
-                            idx,
-                            row["name"],
-                            row["article"],
-                            row["stock"],
-                        ]
-                    )
+            for idx, row in enumerate(report_rows, start=1):
+                writer.writerow([
+                    idx,
+                    row["name"],
+                    row["article"],
+                    row["stock"],
+                ])
 
-        ok_auto = send_telegram_document(path_auto, caption="Остатки Auto-MiX")
-        ok_trail = send_telegram_document(path_trail, caption="Остатки Trail Gear")
+        ok = send_telegram_document(
+            tmp_path,
+            caption="Остатки Ozon (оба кабинета)",
+        )
 
-        if ok_auto:
-            print(f"[STOCK] CSV (Auto-MiX) отправлен: {path_auto}")
+        if ok:
+            print(f"[STOCK] CSV отправлен: {tmp_path}")
         else:
-            print(f"[STOCK] Ошибка отправки CSV (Auto-MiX): {path_auto}")
-
-        if ok_trail:
-            print(f"[STOCK] CSV (Trail Gear) отправлен: {path_trail}")
-        else:
-            print(f"[STOCK] Ошибка отправки CSV (Trail Gear): {path_trail}")
+            print(f"[STOCK] Ошибка отправки CSV: {tmp_path}")
 
     finally:
-        for path in (path_auto, path_trail):
-            try:
-                os.remove(path)
-            except:
-                pass
+        try:
+            os.remove(tmp_path)
+        except:
+            pass
 
 def main(dry_run: bool | None = None) -> None:
     if dry_run is None:
