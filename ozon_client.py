@@ -33,27 +33,32 @@ def get_products_state_by_offer_ids(offer_ids):
     """
     Возвращает словарь {offer_id: state} для переданных offer_id.
     Использует /v3/product/info/list.
-      - ARCHIVED, если is_archived или is_autoarchived = True
-      - ACTIVE  иначе
-      - None   если товар вообще не найден Ozon
+
+    Логика:
+      - "ARCHIVED", если:
+          * is_archived или is_autoarchived = True
+          * ИЛИ state/status в ответе Ozon = archived/disabled (снято с продажи)
+      - "ACTIVE"  иначе
+      - None      если товар вообще не найден Ozon
     """
     if not offer_ids:
         return {}
 
     url = f"{OZON_API_URL}/v3/product/info/list"
-
     BATCH_SIZE = 1000
-    result = {}
+    result: dict[str, str | None] = {}
 
     for i in range(0, len(offer_ids), BATCH_SIZE):
         batch = offer_ids[i:i + BATCH_SIZE]
-        body = {"offer_id": batch, "product_id": [], "sku": []}
+        body = {"offer_id": batch}
 
         r = requests.post(url, json=body, headers=HEADERS, timeout=30)
+
         if r.status_code != 200:
             msg = (
-                f"❗ Ошибка Ozon /v3/product/info/list: status={r.status_code}, "
-                f"body={r.text[:500]}"
+                "❗ Ошибка Ozon /v3/product/info/list\n"
+                f"HTTP {r.status_code}\n"
+                f"{r.text[:2000]}"
             )
             print(msg)
             try:
@@ -69,16 +74,28 @@ def get_products_state_by_offer_ids(offer_ids):
             oid = item.get("offer_id")
             if not oid:
                 continue
-            is_archived = bool(item.get("is_archived")) or bool(item.get("is_autoarchived"))
-            state = "ARCHIVED" if is_archived else "ACTIVE"
+
+            # Базовые флаги архива
+            is_archived_flag = bool(item.get("is_archived")) or bool(item.get("is_autoarchived"))
+
+            # Дополнительно смотрим на текстовые статусы
+            state_raw = (item.get("state") or item.get("status") or "").strip()
+            state_upper = state_raw.upper()
+
+            # Всё, что явно в архиве или снято с продажи, считаем ARCHIVED
+            if is_archived_flag or state_upper in ("ARCHIVED", "DISABLED"):
+                state = "ARCHIVED"
+            else:
+                state = "ACTIVE"
+
             result[oid] = state
 
+    # Для всех, кто не пришёл в ответе, явно проставим None
     for oid in offer_ids:
         if oid not in result:
             result[oid] = None
 
     return result
-
 
 def update_stocks(stocks: list) -> dict:
     """
