@@ -178,18 +178,39 @@ def build_ozon_stocks_from_ms() -> tuple[list[dict], int, list[dict]]:
 
     # Первый кабинет (Auto-MiX)
     try:
-        ozon1_states = get_products_state_by_offer_ids(offer_ids) or []
+        ozon1_states_raw = get_products_state_by_offer_ids(offer_ids) or []
     except Exception as e:
         print(f"[STOCK] Ошибка получения статусов товаров в первом кабинете Ozon: {e!r}")
-        ozon1_states = []
+        ozon1_states_raw = []
 
     # Второй кабинет (Trail Gear) – функция должна быть добавлена в ozon_client2
     try:
         from ozon_client2 import get_products_state_by_offer_ids as get_products_state_by_offer_ids_ozon2
-        ozon2_states = get_products_state_by_offer_ids_ozon2(offer_ids) or []
+        ozon2_states_raw = get_products_state_by_offer_ids_ozon2(offer_ids) or []
     except Exception as e:
         print(f"[STOCK] Не удалось получить статусы товаров во втором кабинете Ozon: {e!r}")
-        ozon2_states = []
+        ozon2_states_raw = []
+
+    # Приводим ответы к виду list[dict{"offer_id":..., "state":...}]
+    def _normalize_states(items):
+        norm: list[dict] = []
+        for it in items:
+            if isinstance(it, dict):
+                offer_id = it.get("offer_id") or it.get("offerId") or it.get("offer")
+                state = it.get("state") or it.get("status")
+                norm.append({
+                    "offer_id": normalize_article(offer_id) if offer_id else None,
+                    "state": state,
+                })
+            elif isinstance(it, str):
+                norm.append({
+                    "offer_id": normalize_article(it),
+                    "state": None,
+                })
+        return norm
+
+    ozon1_states = _normalize_states(ozon1_states_raw)
+    ozon2_states = _normalize_states(ozon2_states_raw)
 
     # Приоритет статусов: archived > disabled > unavailable > available > остальное
     status_priority: dict[str | None, int] = {
