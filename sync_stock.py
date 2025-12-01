@@ -173,78 +173,34 @@ def build_ozon_stocks_from_ms() -> tuple[list[dict], int, list[dict]]:
 
     # ---------- ФИЛЬТРАЦИЯ ПО СТАТУСАМ ТОВАРОВ В OZON (оба кабинета) ----------
 
-    # Уникальный список артикулов
     offer_ids = sorted({c[0] for c in candidates})
 
-    # Первый кабинет (Auto-MiX)
+    # первый кабинет – словарь {offer_id: "ARCHIVED"/"ACTIVE"/None}
     try:
-        ozon1_states_raw = get_products_state_by_offer_ids(offer_ids) or []
+        ozon1_states: dict[str, str | None] = get_products_state_by_offer_ids(offer_ids) or {}
     except Exception as e:
         print(f"[STOCK] Ошибка получения статусов товаров в первом кабинете Ozon: {e!r}")
-        ozon1_states_raw = []
+        ozon1_states = {}
 
-    # Второй кабинет (Trail Gear) – функция должна быть добавлена в ozon_client2
+    # второй кабинет – такая же сигнатура
     try:
         from ozon_client2 import get_products_state_by_offer_ids as get_products_state_by_offer_ids_ozon2
-        ozon2_states_raw = get_products_state_by_offer_ids_ozon2(offer_ids) or []
+        ozon2_states: dict[str, str | None] = get_products_state_by_offer_ids_ozon2(offer_ids) or {}
     except Exception as e:
         print(f"[STOCK] Не удалось получить статусы товаров во втором кабинете Ozon: {e!r}")
-        ozon2_states_raw = []
+        ozon2_states = {}
 
-    # Приводим ответы к виду list[dict{"offer_id":..., "state":...}]
-    def _normalize_states(items):
-        norm: list[dict] = []
-        for it in items:
-            if isinstance(it, dict):
-                offer_id = it.get("offer_id") or it.get("offerId") or it.get("offer")
-                state = it.get("state") or it.get("status")
-                norm.append({
-                    "offer_id": normalize_article(offer_id) if offer_id else None,
-                    "state": state,
-                })
-            elif isinstance(it, str):
-                norm.append({
-                    "offer_id": normalize_article(it),
-                    "state": None,
-                })
-        return norm
-
-    ozon1_states = _normalize_states(ozon1_states_raw)
-    ozon2_states = _normalize_states(ozon2_states_raw)
-
-    # Приоритет статусов: archived > disabled > unavailable > available > остальное
-    status_priority: dict[str | None, int] = {
-        "archived": 3,
-        "disabled": 2,
-        "unavailable": 1,
-        "available": 0,
-        "": -1,
-        None: -1,
-    }
-
-    status_map: dict[str, str | None] = {}
-
-    def merge_state(offer_id: str | None, state: str | None) -> None:
-        if not offer_id:
-            return
-        prev_state = status_map.get(offer_id)
-        cur_pri = status_priority.get(state, -1)
-        prev_pri = status_priority.get(prev_state, -1)
-        if prev_state is None or cur_pri > prev_pri:
-            status_map[offer_id] = state
-
-    for item in ozon1_states:
-        merge_state(item.get("offer_id"), item.get("state"))
-
-    for item in ozon2_states:
-        merge_state(item.get("offer_id"), item.get("state"))
+    def is_archived_any(oid: str) -> bool:
+        """Товар считаем «в архиве/снят с продажи», если в любом кабинете state == ARCHIVED."""
+        s1 = ozon1_states.get(oid)
+        s2 = ozon2_states.get(oid)
+        return s1 == "ARCHIVED" or s2 == "ARCHIVED"
 
     filtered_candidates: list[tuple[str, int, int]] = []
     skipped_not_allowed = 0
 
     for article, stock, ozon_wh_id in candidates:
-        state = status_map.get(article, "available")
-        if state in ("archived", "disabled", "unavailable"):
+        if is_archived_any(article):
             skipped_not_allowed += 1
             continue
         filtered_candidates.append((article, stock, ozon_wh_id))
@@ -346,7 +302,7 @@ def main(dry_run: bool | None = None) -> None:
     update_stocks(stocks)
 
     # Небольшая пауза перед обновлением второго кабинета,
-    # чтобы чуть снизить риск TOO_MANY_REQUESTS
+    # чтобы снизить риск TOO_MANY_REQUESTS
     time.sleep(1.5)
 
     # Второй кабинет (Trail Gear)
