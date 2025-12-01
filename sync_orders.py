@@ -307,7 +307,7 @@ def process_posting(posting: dict, dry_run: bool) -> None:
             update_customer_order_state(existing["meta"]["href"], state_meta_href)
 
         # При delivering/delivered создаём отгрузку и для существующего заказа
-                if status in ("delivering", "delivered"):
+            if status in ("delivering", "delivered"):
             try:
                 create_demand_from_order(existing["meta"]["href"])
             except Exception as e:
