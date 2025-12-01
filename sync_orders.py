@@ -307,7 +307,7 @@ def process_posting(posting: dict, dry_run: bool) -> None:
             update_customer_order_state(existing["meta"]["href"], state_meta_href)
 
         # При delivering/delivered создаём отгрузку и для существующего заказа
-        if status in ("delivering", "delivered"):
+                if status in ("delivering", "delivered"):
             try:
                 create_demand_from_order(existing["meta"]["href"])
             except Exception as e:
@@ -320,8 +320,7 @@ def process_posting(posting: dict, dry_run: bool) -> None:
                     send_telegram_message(msg)
                 except Exception:
                     pass
-
-        return
+                raise
 
     # Создаём новый заказ
     created = create_customer_order(payload)
@@ -330,13 +329,15 @@ def process_posting(posting: dict, dry_run: bool) -> None:
     if status in ("delivering", "delivered"):
         try:
             create_demand_from_order(created["meta"]["href"])
-        except Exception as e:
+                except Exception as e:
             msg = f"[ORDERS] Ошибка создания отгрузки для заказа {order_name}: {e!r}"
             print(msg)
             try:
                 send_telegram_message(msg)
             except Exception:
                 pass
+            # пробрасываем исключение наверх, чтобы sync_fbs_orders добавил его в CSV
+            raise
 
 async def send_report_to_telegram(file_path):
     """Функция для отправки файла в Telegram асинхронно."""
