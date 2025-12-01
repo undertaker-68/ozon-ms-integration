@@ -177,51 +177,51 @@ def build_ozon_stocks_from_ms() -> tuple[list[dict], int, list[dict]]:
 
     # ============ ФИЛЬТРАЦИЯ ПО СТАТУСАМ OZON (оба кабинета) ============
 
-# нормализованный список offer_id
-offer_ids = [c[0] for c in candidates]
+    # нормализованный список offer_id
+    offer_ids = [c[0] for c in candidates]
 
-# статусы первого кабинета
-from ozon_client import get_products_state_by_offer_ids as ozon1_states_fetch
-ozon1_states = ozon1_states_fetch(offer_ids) or []
+    # статусы первого кабинета
+    from ozon_client import get_products_state_by_offer_ids as ozon1_states_fetch
+    ozon1_states = ozon1_states_fetch(offer_ids) or []
 
-# статусы второго кабинета
-from ozon_client2 import get_products_state_by_offer_ids as ozon2_states_fetch
-ozon2_states = ozon2_states_fetch(offer_ids) or []
+    # статусы второго кабинета
+    from ozon_client2 import get_products_state_by_offer_ids as ozon2_states_fetch
+    ozon2_states = ozon2_states_fetch(offer_ids) or []
 
-# Создаём карту offer_id → state (берём самое «жёсткое» состояние)
-status_map = {}
+    # Создаём карту offer_id → state (берём самое «жёсткое» состояние)
+    status_map = {}
 
-def merge_state(offer_id, state):
-    if not offer_id or not state:
-        return
+    def merge_state(offer_id, state):
+        if not offer_id or not state:
+            return
     # Приоритет: archived > disabled > unavailable > available
-    prior = {
-        "archived": 3,
-        "disabled": 2,
-        "unavailable": 1,
-        "available": 0,
-        None: -1,
-    }
-    prev = status_map.get(offer_id)
-    if prev is None or prior[state] > prior.get(prev, -1):
-        status_map[offer_id] = state
+        prior = {
+            "archived": 3,
+            "disabled": 2,
+            "unavailable": 1,
+            "available": 0,
+            None: -1,
+        }
+        prev = status_map.get(offer_id)
+        if prev is None or prior[state] > prior.get(prev, -1):
+            status_map[offer_id] = state
 
-for item in ozon1_states:
-    merge_state(item.get("offer_id"), item.get("state"))
+    for item in ozon1_states:
+        merge_state(item.get("offer_id"), item.get("state"))
 
-for item in ozon2_states:
-    merge_state(item.get("offer_id"), item.get("state"))
+    for item in ozon2_states:
+        merge_state(item.get("offer_id"), item.get("state"))
 
-# Теперь фильтруем кандидатов
-filtered_candidates = []
-for article, stock, wh in candidates:
-    state = status_map.get(article, "available")
-    if state in ("archived", "disabled", "unavailable"):
-        # не включаем
-        continue
-    filtered_candidates.append((article, stock, wh))
+    # Теперь фильтруем кандидатов
+    filtered_candidates = []
+    for article, stock, wh in candidates:
+        state = status_map.get(article, "available")
+        if state in ("archived", "disabled", "unavailable"):
+            # не включаем
+            continue
+        filtered_candidates.append((article, stock, wh))
 
-candidates = filtered_candidates
+    candidates = filtered_candidates
 # ============================================================
 
     stocks: list[dict] = []
