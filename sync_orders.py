@@ -411,7 +411,7 @@ def sync_fbs_orders(dry_run: bool, limit: int = 300):
             )
             continue  # Пропускаем этот заказ
 
-                try:
+        try:
             process_posting(posting, dry_run)
         except Exception as e:
             reason = _human_error_from_exception(e)
