@@ -215,6 +215,14 @@ def main(dry_run: bool | None = None) -> None:
 
     print(f"[STOCK] DRY_RUN={dry_run}")
 
+    # Уведомление о запуске из cron
+    try:
+        send_telegram_message(
+            f"🔁 CRON: запуск sync_stock (остатки), DRY_RUN={dry_run}"
+        )
+    except Exception as e:
+        print("[STOCK] Не удалось отправить телеграм-уведомление о запуске:", e)
+
     stocks, skipped, report_rows = build_ozon_stocks_from_ms()
 
     print(f"[STOCK] Пропущено (нет в Ozon): {skipped}")
