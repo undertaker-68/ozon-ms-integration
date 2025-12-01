@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 
 from ms_client import get_stock_all
 from ozon_client import get_products_state_by_offer_ids, update_stocks
+from ozon_client2 import update_stocks as update_stocks_ozon2
 
 try:
     from notifier import send_telegram_message, send_telegram_document
@@ -155,41 +156,58 @@ def build_ozon_stocks_from_ms() -> tuple[list[dict], int, list[dict]]:
 
     return stocks, skipped_not_found, report_rows
 
-
 def _send_stock_report_file(report_rows: list[dict]) -> None:
+    """
+    Отправляем ДВА CSV-файла в Telegram:
+      - Остатки Auto-MiX
+      - Остатки Trail Gear
+    Содержимое одинаковое, подписи разные.
+    """
     if not report_rows:
         print("[STOCK] Нет данных — CSV не создан.")
         return
 
-    fd, tmp_path = tempfile.mkstemp(prefix="ozon_stock_", suffix=".csv")
-    os.close(fd)
+    fd1, path_auto = tempfile.mkstemp(prefix="ozon_stock_auto_", suffix=".csv")
+    os.close(fd1)
+    fd2, path_trail = tempfile.mkstemp(prefix="ozon_stock_trail_", suffix=".csv")
+    os.close(fd2)
 
     try:
-        with open(tmp_path, "w", newline="", encoding="utf-8-sig") as f:
-            writer = csv.writer(f, delimiter=";")
-            writer.writerow(["№", "Наименование", "Артикул", "Кол-во"])
+        # Заполняем оба файла одинаковыми данными
+        for path in (path_auto, path_trail):
+            with open(path, "w", newline="", encoding="utf-8-sig") as f:
+                writer = csv.writer(f, delimiter=";")
+                writer.writerow(["№", "Наименование", "Артикул", "Кол-во"])
 
-            for idx, row in enumerate(report_rows, start=1):
-                writer.writerow([
-                    idx,
-                    row["name"],
-                    row["article"],
-                    row["stock"],
-                ])
+                for idx, row in enumerate(report_rows, start=1):
+                    writer.writerow(
+                        [
+                            idx,
+                            row["name"],
+                            row["article"],
+                            row["stock"],
+                        ]
+                    )
 
-        ok = send_telegram_document(tmp_path, caption="Отчёт по остаткам Ozon")
+        ok_auto = send_telegram_document(path_auto, caption="Остатки Auto-MiX")
+        ok_trail = send_telegram_document(path_trail, caption="Остатки Trail Gear")
 
-        if ok:
-            print(f"[STOCK] CSV отправлен: {tmp_path}")
+        if ok_auto:
+            print(f"[STOCK] CSV (Auto-MiX) отправлен: {path_auto}")
         else:
-            print(f"[STOCK] Ошибка отправки CSV: {tmp_path}")
+            print(f"[STOCK] Ошибка отправки CSV (Auto-MiX): {path_auto}")
+
+        if ok_trail:
+            print(f"[STOCK] CSV (Trail Gear) отправлен: {path_trail}")
+        else:
+            print(f"[STOCK] Ошибка отправки CSV (Trail Gear): {path_trail}")
 
     finally:
-        try:
-            os.remove(tmp_path)
-        except:
-            pass
-
+        for path in (path_auto, path_trail):
+            try:
+                os.remove(path)
+            except:
+                pass
 
 def main(dry_run: bool | None = None) -> None:
     if dry_run is None:
@@ -205,7 +223,7 @@ def main(dry_run: bool | None = None) -> None:
 
     _send_stock_report_file(report_rows)
 
-    if dry_run:
+        if dry_run:
         print("[STOCK] DRY_RUN: обновление в Ozon не выполняется.")
         return
 
@@ -213,8 +231,19 @@ def main(dry_run: bool | None = None) -> None:
         print("[STOCK] Нет позиций для обновления.")
         return
 
+    # Первый кабинет (Auto-MiX)
     update_stocks(stocks)
 
+    # Второй кабинет (Trail Gear)
+    try:
+        update_stocks_ozon2(stocks)
+    except Exception as e:
+        msg = f"[STOCK] Ошибка обновления остатков во втором кабинете Ozon: {e!r}"
+        print(msg)
+        try:
+            send_telegram_message(msg)
+        except Exception:
+            pass
 
 if __name__ == "__main__":
     main()
