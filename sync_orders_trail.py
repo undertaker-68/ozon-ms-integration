@@ -325,12 +325,7 @@ def sync_fbs_orders(dry_run: bool, limit: int = 300):
             reason = _human_error_from_exception(e)
             error_rows.extend(_build_error_rows_for_posting(posting, reason))
 
-    _append_order_errors_to_file(error_rows)
-
-    if error_rows:
-        asyncio.run(send_report_to_telegram(ERRORS_FILE_PATH))
-
-
+   _append_order_errors_to_file(error_rows)
 if __name__ == "__main__":
     print("Запуск синхронизации заказов Ozon (Trail Gear) с МойСклад...")
     sync_fbs_orders(dry_run=DRY_RUN_ORDERS, limit=300)
