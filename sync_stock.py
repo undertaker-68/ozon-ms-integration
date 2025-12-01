@@ -120,7 +120,7 @@ def build_ozon_stocks_from_ms() -> tuple[list[dict], int, list[dict]]:
             if article not in names_by_article and name:
                 names_by_article[article] = name
 
-    if not candidates:
+if not candidates:
     return [], 0, []
 
 stocks: list[dict] = []
@@ -133,16 +133,16 @@ for article, stock, ozon_wh_id in candidates:
         "warehouse_id": ozon_wh_id,
     })
 
-    report_rows = [
-        {
-            "name": names_by_article.get(s["offer_id"], ""),
-            "article": s["offer_id"],
-            "stock": s["stock"],
-        }
-        for s in stocks
-    ]
+report_rows = [
+     {
+         "name": names_by_article.get(s["offer_id"], ""),
+          "article": s["offer_id"],
+          "stock": s["stock"],
+     }
+     for s in stocks
+]
 
-    return stocks, skipped_not_found, report_rows
+return stocks, skipped_not_found, report_rows
 
 def _send_stock_report_file(report_rows: list[dict]) -> None:
     """
