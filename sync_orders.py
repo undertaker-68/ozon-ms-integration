@@ -329,15 +329,15 @@ def process_posting(posting: dict, dry_run: bool) -> None:
     if status in ("delivering", "delivered"):
         try:
             create_demand_from_order(created["meta"]["href"])
-                except Exception as e:
+        except Exception as e:
             msg = f"[ORDERS] Ошибка создания отгрузки для заказа {order_name}: {e!r}"
-            print(msg)
-            try:
+        print(msg)
+        try:
                 send_telegram_message(msg)
-            except Exception:
-                pass
+        except Exception:
+             pass
             # пробрасываем исключение наверх, чтобы sync_fbs_orders добавил его в CSV
-            raise
+        raise
 
 async def send_report_to_telegram(file_path):
     """Функция для отправки файла в Telegram асинхронно."""
