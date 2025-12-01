@@ -135,18 +135,6 @@ def _append_order_errors_to_file(file_path: str, rows: list[dict]) -> None:
                 ]
             )
 
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        for r in rows:
-            writer.writerow(
-                [
-                    now_str,
-                    r.get("posting_number", ""),
-                    r.get("article", ""),
-                    r.get("name", ""),
-                    r.get("reason", ""),
-                ]
-            )
-
 def _build_error_rows_for_posting(posting: dict, reason: str) -> list[dict]:
     posting_number = posting.get("posting_number", "")
     products = posting.get("products") or []
@@ -331,13 +319,13 @@ def process_posting(posting: dict, dry_run: bool) -> None:
             create_demand_from_order(created["meta"]["href"])
         except Exception as e:
             msg = f"[ORDERS] Ошибка создания отгрузки для заказа {order_name}: {e!r}"
-        print(msg)
-        try:
+            print(msg)
+            try:
                 send_telegram_message(msg)
-        except Exception:
-             pass
+            except Exception:
+                pass
             # пробрасываем исключение наверх, чтобы sync_fbs_orders добавил его в CSV
-        raise
+            raise
 
 async def send_report_to_telegram(file_path):
     """Функция для отправки файла в Telegram асинхронно."""
@@ -385,7 +373,7 @@ def sync_fbs_orders(dry_run: bool, limit: int = 300):
 
     print(f"[ORDERS] Найдено отправлений: {len(postings)}")
 
-        # Определяем дату, до которой заказы должны быть игнорированы
+    # Определяем дату, до которой заказы должны быть игнорированы
     # Обрабатываем только заказы, созданные 01.12.2025 и позже
     cutoff_date = datetime(2025, 12, 1)
 
@@ -393,16 +381,16 @@ def sync_fbs_orders(dry_run: bool, limit: int = 300):
     errors_trail: list[dict] = []
 
     for posting in postings:
-            # Получаем дату создания заказа из поля created_at (Ozon FBS API)
-    created_date_str = posting.get("created_at") or posting.get("created") or posting.get("in_process_at")
-    created_date = None
+        # Получаем дату создания заказа из поля created_at (Ozon FBS API)
+        created_date_str = posting.get("created_at") or posting.get("created") or posting.get("in_process_at")
+        created_date = None
 
-    if created_date_str:
-        # Берём только дату YYYY-MM-DD, игнорируя время и часовой пояс
-        try:
-            created_date = datetime.strptime(created_date_str[:10], "%Y-%m-%d")
-        except Exception:
-            created_date = None
+        if created_date_str:
+            # Берём только дату YYYY-MM-DD, игнорируя время и часовой пояс
+            try:
+                created_date = datetime.strptime(created_date_str[:10], "%Y-%m-%d")
+            except Exception:
+                created_date = None
 
         # Пропускаем заказ, если он был создан до 01.12.2025
         if created_date and created_date < cutoff_date:
