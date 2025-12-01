@@ -28,6 +28,30 @@ IGNORE_STOCK_OFFERS = set(
 )
 
 
+# ---------------------
+#  НОРМАЛИЗАЦИЯ АРТИКУЛОВ
+# ---------------------
+
+# Замена русских букв на английские
+ARTICLE_TRANSLATION = str.maketrans({
+    "А": "A", "В": "B", "Е": "E", "К": "K", "М": "M",
+    "Н": "H", "О": "O", "Р": "P", "С": "C", "Т": "T",
+    "У": "Y", "Х": "X",
+
+    "а": "a", "в": "b", "е": "e", "к": "k", "м": "m",
+    "н": "h", "о": "o", "р": "p", "с": "c", "т": "t",
+    "у": "y", "х": "x",
+})
+
+def normalize_article(article: str) -> str:
+    """Приводим артикула к единой раскладке."""
+    return article.translate(ARTICLE_TRANSLATION).strip()
+
+
+# ---------------------
+#  СКЛАДЫ
+# ---------------------
+
 def _parse_warehouse_map() -> dict[str, int]:
     warehouse_map: dict[str, int] = {}
 
@@ -62,6 +86,10 @@ def _parse_warehouse_map() -> dict[str, int]:
 WAREHOUSE_MAP = _parse_warehouse_map()
 
 
+# ---------------------
+#  ЧТЕНИЕ ОСТАТКОВ ИЗ МС
+# ---------------------
+
 def _fetch_ms_stock_rows_for_store(ms_store_id: str, limit: int = 1000) -> list[dict]:
     rows: list[dict] = []
     offset = 0
@@ -83,6 +111,22 @@ def _fetch_ms_stock_rows_for_store(ms_store_id: str, limit: int = 1000) -> list[
     return rows
 
 
+# ---------------------
+#  ФИЛЬТРАЦИЯ + НОРМА АРТИКУЛОВ
+# ---------------------
+
+def _is_archive_or_deleted(row: dict) -> bool:
+    """Не используем товары «В архиве» или «Сняты с продажи»."""
+    assortment = row.get("assortment") or {}
+    a_state = (assortment.get("archived") or False)
+    status = (assortment.get("status") or "").lower().strip()
+
+    return (
+        a_state is True
+        or status in ("archived", "removed", "discontinued", "snyat_s_prodazhi", "снят с продажи", "снят с продаж")
+    )
+
+
 def build_ozon_stocks_from_ms() -> tuple[list[dict], int, list[dict]]:
     candidates: list[tuple[str, int, int]] = []
     names_by_article: dict[str, str] = {}
@@ -93,8 +137,19 @@ def build_ozon_stocks_from_ms() -> tuple[list[dict], int, list[dict]]:
         rows = _fetch_ms_stock_rows_for_store(ms_store_id)
 
         for row in rows:
-            article = row.get("article")
-            if not article:
+
+            # ❌ Пропускаем архив / сняты с продажи
+            if _is_archive_or_deleted(row):
+                continue
+
+            article_raw = row.get("article")
+            if not article_raw:
+                continue
+
+            # ✔️ нормализуем артикул
+            article = normalize_article(article_raw)
+
+            if article in IGNORE_STOCK_OFFERS:
                 continue
 
             name = (
@@ -102,9 +157,6 @@ def build_ozon_stocks_from_ms() -> tuple[list[dict], int, list[dict]]:
                 or (row.get("assortment") or {}).get("name")
                 or ""
             )
-
-            if article in IGNORE_STOCK_OFFERS:
-                continue
 
             stock_raw = row.get("stock", 0)
             try:
@@ -120,12 +172,11 @@ def build_ozon_stocks_from_ms() -> tuple[list[dict], int, list[dict]]:
             if article not in names_by_article and name:
                 names_by_article[article] = name
 
-    # ← ← ← ВАЖНО: всё, что ниже — внутри функции!
     if not candidates:
         return [], 0, []
 
     stocks: list[dict] = []
-    skipped_not_found = 0  # оставляем для совместимости с сигнатурой
+    skipped_not_found = 0
 
     for article, stock, ozon_wh_id in candidates:
         stocks.append({
@@ -145,11 +196,13 @@ def build_ozon_stocks_from_ms() -> tuple[list[dict], int, list[dict]]:
 
     return stocks, skipped_not_found, report_rows
 
+
+
+# ---------------------
+#  ОТЧЁТ В TELEGRAM
+# ---------------------
+
 def _send_stock_report_file(report_rows: list[dict]) -> None:
-    """
-    Отправляем ОДИН CSV-файл в Telegram —
-    общий отчёт по остаткам для обоих кабинетов.
-    """
     if not report_rows:
         print("[STOCK] Нет данных — CSV не создан.")
         return
@@ -170,15 +223,8 @@ def _send_stock_report_file(report_rows: list[dict]) -> None:
                     row["stock"],
                 ])
 
-        ok = send_telegram_document(
-            tmp_path,
-            caption="Остатки Ozon (оба кабинета)",
-        )
-
-        if ok:
-            print(f"[STOCK] CSV отправлен: {tmp_path}")
-        else:
-            print(f"[STOCK] Ошибка отправки CSV: {tmp_path}")
+        ok = send_telegram_document(tmp_path, caption="Остатки Ozon (оба кабинета)")
+        print(f"[STOCK] CSV отправлен: {tmp_path}" if ok else f"[STOCK] Ошибка отправки CSV: {tmp_path}")
 
     finally:
         try:
@@ -186,19 +232,21 @@ def _send_stock_report_file(report_rows: list[dict]) -> None:
         except:
             pass
 
+
+# ---------------------
+#  ОСНОВНОЙ КОД
+# ---------------------
+
 def main(dry_run: bool | None = None) -> None:
     if dry_run is None:
         dry_run = DRY_RUN
 
     print(f"[STOCK] DRY_RUN={dry_run}")
 
-    # Уведомление о запуске из cron
     try:
-        send_telegram_message(
-            f"🔁 CRON: запуск sync_stock (остатки), DRY_RUN={dry_run}"
-        )
-    except Exception as e:
-        print("[STOCK] Не удалось отправить телеграм-уведомление о запуске:", e)
+        send_telegram_message(f"🔁 CRON: запуск sync_stock (остатки), DRY_RUN={dry_run}")
+    except Exception:
+        pass
 
     stocks, skipped, report_rows = build_ozon_stocks_from_ms()
 
@@ -227,8 +275,9 @@ def main(dry_run: bool | None = None) -> None:
         print(msg)
         try:
             send_telegram_message(msg)
-        except Exception:
+        except:
             pass
+
 
 if __name__ == "__main__":
     main()
