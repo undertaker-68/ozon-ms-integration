@@ -44,11 +44,12 @@ if not (MS_ORGANIZATION_HREF and MS_AGENT_HREF and MS_STORE_HREF):
         "Скопируйте meta.href из МойСклад."
     )
 
-# Отдельный файл ошибок для Trail Gear, чтобы не мешать с первым кабинетом
+# Общий CSV для ошибок (как у первого кабинета)
 ERRORS_FILE_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "orders_errors.csv",
 )
+
 
 def _human_error_from_exception(e: Exception) -> str:
     if isinstance(e, requests.HTTPError):
@@ -154,6 +155,10 @@ def _build_error_rows_for_posting(posting: dict, reason: str) -> list[dict]:
 
 
 def build_ms_positions_from_posting(posting: dict) -> list[dict]:
+    """
+    Собираем позиции для заказа МойСклад по товарам из отправления Ozon.
+    Если какие-то товары не найдены — логируем и даём вызвать обработку ошибки выше.
+    """
     products = posting.get("products") or []
     ms_positions = []
     missing = []
@@ -185,11 +190,14 @@ def build_ms_positions_from_posting(posting: dict) -> list[dict]:
         )
         print("[ORDERS TG]", text.replace("\n", " | "))
 
+        # как в первом кабинете — не создаём заказ по этому отправлению
+        return []
+
     return ms_positions
 
 
 async def send_report_to_telegram(file_path: str):
-    """Отправка файла с ошибками в Telegram асинхронно."""
+    """Отправка файла с ошибками в Telegram асинхронно (если понадобится вызывать вручную)."""
     bot = Bot(token=os.getenv("TG_BOT_TOKEN"))
     chat_id = os.getenv("TG_CHAT_ID")
     if not chat_id:
@@ -235,29 +243,29 @@ def process_posting(posting: dict, dry_run: bool) -> None:
     ]
 
     org_meta = {
-    "href": MS_ORGANIZATION_HREF,
-    "type": "organization",
-    "mediaType": "application/json",
-}
-agent_meta = {
-    "href": MS_AGENT_HREF,
-    "type": "counterparty",
-    "mediaType": "application/json",
-}
-store_meta = {
-    "href": MS_STORE_HREF,
-    "type": "store",
-    "mediaType": "application/json",
-}
+        "href": MS_ORGANIZATION_HREF,
+        "type": "organization",
+        "mediaType": "application/json",
+    }
+    agent_meta = {
+        "href": MS_AGENT_HREF,
+        "type": "counterparty",
+        "mediaType": "application/json",
+    }
+    store_meta = {
+        "href": MS_STORE_HREF,
+        "type": "store",
+        "mediaType": "application/json",
+    }
 
-payload = {
-    "name": order_name,
-    "organization": {"meta": org_meta},
-    "agent": {"meta": agent_meta},
-    "store": {"meta": store_meta},
-    "positions": positions_payload,
-    "description": "FBS → Trail Gear",
-}
+    payload = {
+        "name": order_name,
+        "organization": {"meta": org_meta},
+        "agent": {"meta": agent_meta},
+        "store": {"meta": store_meta},
+        "positions": positions_payload,
+        "description": "FBS → Trail Gear",
+    }
 
     if state_meta_href:
         payload["state"] = {
@@ -312,7 +320,7 @@ def sync_fbs_orders(dry_run: bool, limit: int = 300):
 
     print(f"[ORDERS TG] Найдено отправлений: {len(postings)}")
 
-    # Ограничение по дате (как в основном скрипте)
+    # Ограничение по дате
     cutoff_date = datetime(2025, 11, 30)
 
     error_rows: list[dict] = []
@@ -340,7 +348,9 @@ def sync_fbs_orders(dry_run: bool, limit: int = 300):
             reason = _human_error_from_exception(e)
             error_rows.extend(_build_error_rows_for_posting(posting, reason))
 
-   _append_order_errors_to_file(error_rows)
+    _append_order_errors_to_file(error_rows)
+
+
 if __name__ == "__main__":
     print("Запуск синхронизации заказов Ozon (Trail Gear) с МойСклад...")
     sync_fbs_orders(dry_run=DRY_RUN_ORDERS, limit=300)
