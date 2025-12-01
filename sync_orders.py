@@ -348,6 +348,14 @@ async def send_report_to_telegram(file_path):
 def sync_fbs_orders(dry_run: bool, limit: int = 300):
     print(f"[ORDERS] Старт sync_fbs_orders, DRY_RUN_ORDERS={dry_run}")
 
+    # Уведомление о запуске из cron (или любого другого запуска)
+    try:
+        send_telegram_message(
+            f"🔁 CRON: запуск sync_fbs_orders (заказы), DRY_RUN_ORDERS={dry_run}"
+        )
+    except Exception as e:
+        print("[ORDERS] Не удалось отправить телеграм-уведомление о запуске:", e)
+
     postings: list[dict] = []
 
     # --- Кабинет Ozon №1 (как раньше) ---
