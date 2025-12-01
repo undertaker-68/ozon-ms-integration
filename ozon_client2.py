@@ -171,6 +171,54 @@ def update_stocks(stocks: list) -> dict:
 
     return {"result": all_results}
 
+def get_products_state_by_offer_ids(offer_ids: list[str]) -> list[dict]:
+    """
+    Аналог основного кабинета, но для Ozon2.
+    Получает статусы товарных предложений по offer_id.
+    Возвращает список вида:
+      [
+        {"offer_id": "ABC", "state": "available"},
+        ...
+      ]
+    """
+    if not offer_ids:
+        return []
+
+    url = f"{OZON_API_URL}/v2/products/info"
+    body = {"offer_id": offer_ids}
+
+    r = requests.post(url, json=body, headers=HEADERS, timeout=30)
+
+    if r.status_code != 200:
+        msg = (
+            "❗ Ошибка Ozon2 /v2/products/info\n"
+            f"HTTP {r.status_code}\n"
+            f"{r.text[:500]}"
+        )
+        print(msg)
+        try:
+            send_telegram_message(msg)
+        except:
+            pass
+        return []
+
+    try:
+        data = r.json()
+    except Exception:
+        print("❗ Некорректный JSON от Ozon2 при /v2/products/info")
+        return []
+
+    items = data.get("result", []) or []
+
+    result = []
+    for it in items:
+        result.append({
+            "offer_id": it.get("offer_id"),
+            "state": it.get("state"),   # available / disabled / archived / unavailable
+        })
+
+    return result
+
 def get_fbs_postings(limit: int = 3) -> dict:
     """
     Получение FBS-отправлений из ВТОРОГО кабинета Ozon (Trail Gear)
