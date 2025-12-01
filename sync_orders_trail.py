@@ -234,15 +234,30 @@ def process_posting(posting: dict, dry_run: bool) -> None:
         for pos in ms_positions
     ]
 
-    payload = {
-        "name": order_name,
-        "organization": {"meta": {"href": MS_ORGANIZATION_HREF}},
-        "agent": {"meta": {"href": MS_AGENT_HREF}},
-        "store": {"meta": {"href": MS_STORE_HREF}},
-        "positions": positions_payload,
-        # КОММЕНТАРИЙ ДЛЯ ЭТОГО КАБИНЕТА:
-        "description": "FBS → Trail Gear",
-    }
+    org_meta = {
+    "href": MS_ORGANIZATION_HREF,
+    "type": "organization",
+    "mediaType": "application/json",
+}
+agent_meta = {
+    "href": MS_AGENT_HREF,
+    "type": "counterparty",
+    "mediaType": "application/json",
+}
+store_meta = {
+    "href": MS_STORE_HREF,
+    "type": "store",
+    "mediaType": "application/json",
+}
+
+payload = {
+    "name": order_name,
+    "organization": {"meta": org_meta},
+    "agent": {"meta": agent_meta},
+    "store": {"meta": store_meta},
+    "positions": positions_payload,
+    "description": "FBS → Trail Gear",
+}
 
     if state_meta_href:
         payload["state"] = {
