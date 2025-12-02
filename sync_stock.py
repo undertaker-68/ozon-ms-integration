@@ -190,7 +190,7 @@ def build_ozon_stocks_from_ms() -> tuple[list[dict], int, list[dict]]:
         print(f"[STOCK] Не удалось получить статусы товаров во втором кабинете Ozon: {e!r}")
         ozon2_states = {}
 
-    def is_allowed(oid: str) -> bool:
+def is_allowed(oid: str) -> bool:
     """
     Более мягкая логика:
       - ЯВНО выкидываем только то, что архивно в каком-то кабинете (ARCHIVED).
