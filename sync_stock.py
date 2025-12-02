@@ -191,24 +191,22 @@ def build_ozon_stocks_from_ms() -> tuple[list[dict], int, list[dict]]:
         ozon2_states = {}
 
     def is_allowed(oid: str) -> bool:
-        """
-        Разрешаем товар, если:
-          - он существует хотя бы в одном кабинете (state != None)
-          - и НИ в одном кабинете не помечен как ARCHIVED.
-        Всё, чего нет ни в одном кабинете (оба None), или ARCHIVED – выкидываем.
-        """
-        s1 = ozon1_states.get(oid)
-        s2 = ozon2_states.get(oid)
+    """
+    Более мягкая логика:
+      - ЯВНО выкидываем только то, что архивно в каком-то кабинете (ARCHIVED).
+      - Если Ozon ничего не знает про товар (s1 is None и s2 is None) — всё равно ПРОПУСКАЕМ.
+        Это вернёт в работу товары второго кабинета, даже если API по ним молчит.
+    """
+    s1 = ozon1_states.get(oid)
+    s2 = ozon2_states.get(oid)
 
-        # Нет ни в одном кабинете – считаем, что он не должен участвовать.
-        if s1 is None and s2 is None:
-            return False
+    # Если в любом кабинете явно ARCHIVED — выкидываем.
+    if s1 == "ARCHIVED" or s2 == "ARCHIVED":
+        return False
 
-        # В любом кабинете помечен как архивный – тоже выкидываем.
-        if s1 == "ARCHIVED" or s2 == "ARCHIVED":
-            return False
-
-        return True
+    # Всё остальное считаем допустимым (включая тот случай,
+    # когда Ozon вообще не вернул статусы по offer_id).
+    return True
 
     filtered_candidates: list[tuple[str, int, int]] = []
     skipped_total = 0
