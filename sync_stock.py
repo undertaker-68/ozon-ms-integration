@@ -125,7 +125,7 @@ def build_ozon_stocks_from_ms() -> tuple[list[dict], int, list[dict]]:
 
     Возвращаем:
       stocks         – список для API /v2/products/stocks
-      skipped_count  – сколько позиций отфильтровано по статусам
+      skipped_count  – сколько позиций отфильтровано (архив/нет в Ozon)
       report_rows    – строки для CSV-отчёта
     """
     candidates: list[tuple[str, int, int]] = []
@@ -190,18 +190,32 @@ def build_ozon_stocks_from_ms() -> tuple[list[dict], int, list[dict]]:
         print(f"[STOCK] Не удалось получить статусы товаров во втором кабинете Ozon: {e!r}")
         ozon2_states = {}
 
-    def is_archived_any(oid: str) -> bool:
-        """Товар считаем «в архиве/снят с продажи», если в любом кабинете state == ARCHIVED."""
+    def is_allowed(oid: str) -> bool:
+        """
+        Разрешаем товар, если:
+          - он существует хотя бы в одном кабинете (state != None)
+          - и НИ в одном кабинете не помечен как ARCHIVED.
+        Всё, чего нет ни в одном кабинете (оба None), или ARCHIVED – выкидываем.
+        """
         s1 = ozon1_states.get(oid)
         s2 = ozon2_states.get(oid)
-        return s1 == "ARCHIVED" or s2 == "ARCHIVED"
+
+        # Нет ни в одном кабинете – считаем, что он не должен участвовать.
+        if s1 is None and s2 is None:
+            return False
+
+        # В любом кабинете помечен как архивный – тоже выкидываем.
+        if s1 == "ARCHIVED" or s2 == "ARCHIVED":
+            return False
+
+        return True
 
     filtered_candidates: list[tuple[str, int, int]] = []
-    skipped_not_allowed = 0
+    skipped_total = 0
 
     for article, stock, ozon_wh_id in candidates:
-        if is_archived_any(article):
-            skipped_not_allowed += 1
+        if not is_allowed(article):
+            skipped_total += 1
             continue
         filtered_candidates.append((article, stock, ozon_wh_id))
 
@@ -226,7 +240,7 @@ def build_ozon_stocks_from_ms() -> tuple[list[dict], int, list[dict]]:
         for s in stocks
     ]
 
-    return stocks, skipped_not_allowed, report_rows
+    return stocks, skipped_total, report_rows
 
 
 # ---------------------
@@ -284,7 +298,7 @@ def main(dry_run: bool | None = None) -> None:
 
     stocks, skipped, report_rows = build_ozon_stocks_from_ms()
 
-    print(f"[STOCK] Пропущено (по статусам Ozon): {skipped}")
+    print(f"[STOCK] Пропущено (по статусам/нет в Ozon): {skipped}")
     print(f"[STOCK] Передаём в Ozon позиций: {len(stocks)}")
     print(f"[STOCK] Строк в отчёте CSV: {len(report_rows)}")
 
