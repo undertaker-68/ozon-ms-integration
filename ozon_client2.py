@@ -29,6 +29,68 @@ OZON_API_URL = "https://api-seller.ozon.ru"
 
 def get_products_state_by_offer_ids(offer_ids):
     """
+    Возвращает словарь {offer_id: state} для переданных offer_id.
+    Использует /v3/product/info/list.
+      - ARCHIVED, если is_archived или is_autoarchived = True
+      - ACTIVE  иначе
+      - None   если товар вообще не найден в этом кабинете Ozon
+    ВАЖНО: эта функция работает только для второго кабинета (Trail Gear),
+    т.к. использует CLIENT_ID / API_KEY из ozon_client2.py.
+    """
+    if not offer_ids:
+        return {}
+
+    url = f"{OZON_API_URL}/v3/product/info/list"
+    BATCH_SIZE = 1000
+    result: dict[str, str] = {}
+
+    for i in range(0, len(offer_ids), BATCH_SIZE):
+        batch = offer_ids[i:i + BATCH_SIZE]
+        body = {
+            "offer_id": batch,
+            # product_id и sku не используем, они нам не нужны
+        }
+
+        r = requests.post(url, headers=HEADERS, json=body, timeout=30)
+        if r.status_code != 200:
+            msg = (
+                "❗ Ошибка Ozon2 /v3/product/info/list\n"
+                f"HTTP {r.status_code}\n"
+                f"{r.text[:500]}"
+            )
+            print(msg)
+            try:
+                send_telegram_message(msg)
+            except Exception:
+                pass
+            # продолжаем, просто считаем, что для этого батча статусов нет
+            continue
+
+        try:
+            data = r.json()
+        except Exception:
+            print("❗ Ошибка парсинга JSON Ozon2 /v3/product/info/list:", r.text[:500])
+            continue
+
+        items = data.get("items") or data.get("result") or []
+        seen: set[str] = set()
+
+        for item in items:
+            oid = item.get("offer_id")
+            if not oid or oid in seen:
+                continue
+            seen.add(oid)
+
+            is_archived = bool(item.get("is_archived")) or bool(item.get("is_autoarchived"))
+            state = "ARCHIVED" if is_archived else "ACTIVE"
+            result[oid] = state
+
+    # Все offer_id, которых нет в result, считаем state=None (нет в этом кабинете)
+    # Это уже обрабатывается в sync_stock через .get(oid) → None
+    return result
+
+def get_products_state_by_offer_ids(offer_ids):
+    """
     Возвращает словарь {offer_id: state} для переданных offer_id (2-й кабинет).
     Использует /v3/product/info/list.
 
