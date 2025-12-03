@@ -27,54 +27,6 @@ HEADERS = {
 
 OZON_API_URL = "https://api-seller.ozon.ru"
 
-def get_products_state_by_offer_ids(offer_ids: list[str]) -> dict[str, str | None]:
-    """
-    Вернёт словарь: offer_id -> "ACTIVE" / "ARCHIVED" / None (если товар не найден).
-    Использует /v3/product/info/list – актуальный метод Ozon.
-    """
-    if not offer_ids:
-        return {}
-
-    url = f"{BASE_URL}/v3/product/info/list"  # не /v2, а /v3
-    states: dict[str, str | None] = {}
-
-    # Ozon ограничивает размер батча, поэтому бьём на куски
-    CHUNK_SIZE = 100
-    for i in range(0, len(offer_ids), CHUNK_SIZE):
-        chunk = offer_ids[i:i + CHUNK_SIZE]
-
-        payload = {
-            "filter": {
-                "offer_id": chunk,
-            },
-            "limit": len(chunk),
-        }
-
-        resp = _request("POST", url, json=payload)
-        if not resp:
-            continue
-
-        items = resp.get("items") or []
-        for item in items:
-            oid = item.get("offer_id")
-            if not oid:
-                continue
-
-            is_archived = bool(item.get("is_archived")) or bool(item.get("is_autoarchived"))
-            status = (item.get("status") or "").upper()
-            state = "ACTIVE"
-
-            # Считаем всё архивное/снятое с продажи = ARCHIVED
-            if is_archived or status in {"ARCHIVED", "DISABLED", "STOPPED"}:
-                state = "ARCHIVED"
-
-            states[oid] = state
-
-        # Всё, что не вернул метод – считаем None (нет в кабинете)
-        for oid in chunk:
-            states.setdefault(oid, None)
-
-    return states
 
 def get_products_state_by_offer_ids(offer_ids):
     """
@@ -114,7 +66,12 @@ def get_products_state_by_offer_ids(offer_ids):
                 pass
             r.raise_for_status()
 
-        data = r.json()
+        try:
+            data = r.json()
+        except Exception:
+            print("❗ Ошибка парсинга JSON Ozon2 /v3/product/info/list:", r.text[:500])
+            continue
+
         items = data.get("items") or data.get("result") or []
 
         for item in items:
@@ -122,8 +79,10 @@ def get_products_state_by_offer_ids(offer_ids):
             if not oid:
                 continue
 
+            # флаги архива
             is_archived_flag = bool(item.get("is_archived")) or bool(item.get("is_autoarchived"))
 
+            # текстовые статусы
             state_raw = (item.get("state") or item.get("status") or "").strip()
             state_upper = state_raw.upper()
 
@@ -134,11 +93,13 @@ def get_products_state_by_offer_ids(offer_ids):
 
             result[oid] = state
 
+    # Для всех, кто не пришёл в ответе, явно проставим None
     for oid in offer_ids:
         if oid not in result:
             result[oid] = None
 
     return result
+
 
 def update_stocks(stocks: list) -> dict:
     """
@@ -284,53 +245,6 @@ def update_stocks(stocks: list) -> dict:
 
     return {"result": all_results}
 
-def get_products_state_by_offer_ids(offer_ids: list[str]) -> list[dict]:
-    """
-    Аналог основного кабинета, но для Ozon2.
-    Получает статусы товарных предложений по offer_id.
-    Возвращает список вида:
-      [
-        {"offer_id": "ABC", "state": "available"},
-        ...
-      ]
-    """
-    if not offer_ids:
-        return []
-
-    url = f"{OZON_API_URL}/v2/products/info"
-    body = {"offer_id": offer_ids}
-
-    r = requests.post(url, json=body, headers=HEADERS, timeout=30)
-
-    if r.status_code != 200:
-        msg = (
-            "❗ Ошибка Ozon2 /v2/products/info\n"
-            f"HTTP {r.status_code}\n"
-            f"{r.text[:500]}"
-        )
-        print(msg)
-        try:
-            send_telegram_message(msg)
-        except:
-            pass
-        return []
-
-    try:
-        data = r.json()
-    except Exception:
-        print("❗ Некорректный JSON от Ozon2 при /v2/products/info")
-        return []
-
-    items = data.get("result", []) or []
-
-    result = []
-    for it in items:
-        result.append({
-            "offer_id": it.get("offer_id"),
-            "state": it.get("state"),   # available / disabled / archived / unavailable
-        })
-
-    return result
 
 def get_fbs_postings(limit: int = 3) -> dict:
     """
