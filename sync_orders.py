@@ -375,7 +375,7 @@ def sync_fbs_orders(dry_run: bool, limit: int = 300):
 
     # Определяем дату, до которой заказы должны быть игнорированы
     # Обрабатываем только заказы, созданные 01.12.2025 и позже
-    cutoff_date = datetime(2025, 12, 1)
+    cutoff_date = datetime(2025, 12, 3)
 
     errors_auto: list[dict] = []
     errors_trail: list[dict] = []
@@ -392,11 +392,11 @@ def sync_fbs_orders(dry_run: bool, limit: int = 300):
             except Exception:
                 created_date = None
 
-        # Пропускаем заказ, если он был создан до 01.12.2025
+        # Пропускаем заказ, если он был создан до 03.12.2025
         if created_date and created_date < cutoff_date:
             print(
                 f"[ORDERS] Заказ {posting.get('posting_number')} "
-                f"(источник={posting.get('_ozon_account')}) создан до 01.12.2025, пропускаем."
+                f"(источник={posting.get('_ozon_account')}) создан до 03.12.2025, пропускаем."
             )
             continue  # Пропускаем этот заказ
 
