@@ -121,16 +121,21 @@ def _fetch_ms_stock_rows_for_store(ms_store_id: str, limit: int = 1000) -> list[
 # ---------------------
 
 def build_ozon_stocks_from_ms() -> tuple[list[dict], int, list[dict]]:
-    """Читаем остатки из МойСклад и фильтруем по статусам товаров в Ozon.
-
-    Возвращаем:
-      stocks         – список для API /v2/products/stocks
-      skipped_count  – сколько позиций отфильтровано (архив/нет в Ozon)
-      report_rows    – строки для CSV-отчёта
+    """
+    1) Читаем остатки по всем складам из МойСклад → candidates (article, stock, ozon_wh_id)
+    2) По всем артикулам спрашиваем статусы в Ozon #1 и Ozon #2
+    3) Отфильтровываем:
+       - всё, что в Ozon помечено как ARCHIVED/снято с продажи
+       - всё, чего нет ни в одном кабинете (оба None)
+    4) Возвращаем:
+       - stocks для API Ozon
+       - количество пропущенных
+       - строки для CSV-отчёта
     """
     candidates: list[tuple[str, int, int]] = []
     names_by_article: dict[str, str] = {}
 
+    # 1. Собираем кандидатов из МойСклад
     for ms_store_id, ozon_wh_id in WAREHOUSE_MAP.items():
         print(f"[STOCK] Читаем остатки из МС: store_id={ms_store_id} → Ozon warehouse_id={ozon_wh_id}")
 
@@ -171,24 +176,72 @@ def build_ozon_stocks_from_ms() -> tuple[list[dict], int, list[dict]]:
     if not candidates:
         return [], 0, []
 
-    # ---------- ФИЛЬТРАЦИЯ ПО СТАТУСАМ ТОВАРОВ В OZON (оба кабинета) ----------
-
+    # 2. Получаем статусы товаров из обоих кабинетов Ozon
     offer_ids = sorted({c[0] for c in candidates})
 
-    # первый кабинет – словарь {offer_id: "ARCHIVED"/"ACTIVE"/None}
     try:
-        ozon1_states: dict[str, str | None] = get_products_state_by_offer_ids(offer_ids) or {}
+        ozon1_states = get_products_state_by_offer_ids(offer_ids) or {}
     except Exception as e:
-        print(f"[STOCK] Ошибка получения статусов товаров в первом кабинете Ozon: {e!r}")
+        print(f"[STOCK] Не удалось получить статусы из Ozon #1: {e}")
         ozon1_states = {}
 
-    # второй кабинет – такая же сигнатура
     try:
-        from ozon_client2 import get_products_state_by_offer_ids as get_products_state_by_offer_ids_ozon2
-        ozon2_states: dict[str, str | None] = get_products_state_by_offer_ids_ozon2(offer_ids) or {}
+        ozon2_states = get_products_state_by_offer_ids_ozon2(offer_ids) or {}
     except Exception as e:
-        print(f"[STOCK] Не удалось получить статусы товаров во втором кабинете Ozon: {e!r}")
+        print(f"[STOCK] Не удалось получить статусы из Ozon #2: {e}")
         ozon2_states = {}
+
+    def is_allowed(oid: str) -> bool:
+        """
+        Возвращает True, если товар можно передавать на обновление остатков:
+        - не ARCHIVED ни в одном кабинете
+        - и существует хотя бы в одном кабинете (не оба None).
+        """
+        s1 = ozon1_states.get(oid)
+        s2 = ozon2_states.get(oid)
+
+        # Если в хотя бы одном кабинете товар архивен — выкидываем
+        if s1 == "ARCHIVED" or s2 == "ARCHIVED":
+            return False
+
+        # Если товар не найден ни в одном кабинете — тоже не трогаем
+        if s1 is None and s2 is None:
+            return False
+
+        # Во всех остальных случаях обновляем
+        return True
+
+    # 3. Фильтруем кандидатов по статусам
+    filtered_candidates: list[tuple[str, int, int]] = []
+    skipped_total = 0
+
+    for article, stock, ozon_wh_id in candidates:
+        if not is_allowed(article):
+            skipped_total += 1
+            continue
+        filtered_candidates.append((article, stock, ozon_wh_id))
+
+    candidates = filtered_candidates
+
+    # 4. Готовим данные для Ozon и CSV
+    stocks: list[dict] = []
+    for article, stock, ozon_wh_id in candidates:
+        stocks.append({
+            "offer_id": article,
+            "stock": stock,
+            "warehouse_id": ozon_wh_id,
+        })
+
+    report_rows = [
+        {
+            "name": names_by_article.get(s["offer_id"], ""),
+            "article": s["offer_id"],
+            "stock": s["stock"],
+        }
+        for s in stocks
+    ]
+
+    return stocks, skipped_total, report_rows
 
 def is_allowed(oid: str) -> bool:
     """
