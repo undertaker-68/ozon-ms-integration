@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 from ms_client import get_stock_all
 from ozon_client import get_products_state_by_offer_ids, update_stocks
 from ozon_client2 import update_stocks as update_stocks_ozon2
+from ozon_client2 import get_products_state_by_offer_ids as get_products_state_by_offer_ids_ozon2
 
 try:
     from notifier import send_telegram_message, send_telegram_document
