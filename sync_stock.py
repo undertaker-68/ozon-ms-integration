@@ -292,12 +292,9 @@ def is_allowed(oid: str) -> bool:
     ]
 
     return stocks, skipped_total, report_rows
-
-
 # ---------------------
 #  ОТЧЁТ В TELEGRAM
 # ---------------------
-
 def _send_stock_report_file(report_rows: list[dict]) -> None:
     if not report_rows:
         print("[STOCK] Нет данных — CSV не создан.")
@@ -330,12 +327,9 @@ def _send_stock_report_file(report_rows: list[dict]) -> None:
             os.remove(tmp_path)
         except Exception:
             pass
-
-
 # ---------------------
 #  ОСНОВНОЙ КОД
 # ---------------------
-
 def main(dry_run: bool | None = None) -> None:
     if dry_run is None:
         dry_run = DRY_RUN
