@@ -44,23 +44,25 @@ def _ms_get_by_href(href: str) -> dict:
     except Exception:
         return {}
 
-def compute_bundle_available(bundle_row: dict) -> int:
+def compute_bundle_available(bundle_row: dict, stock_by_href: dict[str, int]) -> int:
     """
     Рассчитывает количество доступных комплектов.
     Формула: min(available(component_i) // required_qty_i)
 
     bundle_row – строка ассортимента комплекта, включающая components.
     Структура components бывает разной: элементы могут быть dict или str (href).
+
+    stock_by_href – словарь {assortment.meta.href -> доступный остаток по КОНКРЕТНОМУ складу}
     """
     components = bundle_row.get("components") or []
     if not components:
         return 0
 
-    amounts = []
+    amounts: list[int] = []
 
     for comp in components:
         qty_required = 1
-        href = None
+        href: str | None = None
 
         # Вариант 1: компонент – словарь
         if isinstance(comp, dict):
@@ -68,7 +70,7 @@ def compute_bundle_available(bundle_row: dict) -> int:
 
             assort = comp.get("assortment")
             if isinstance(assort, dict):
-                meta = assort.get("meta", assort)
+                meta = assort.get("meta", assort) or {}
                 if isinstance(meta, dict):
                     href = meta.get("href")
             elif isinstance(assort, str):
@@ -84,10 +86,8 @@ def compute_bundle_available(bundle_row: dict) -> int:
         if not href:
             continue
 
-        # ✅ Берём остаток по КОНКРЕТНОМУ складу (MS_OZON_STORE_HREF)
-        available = get_stock_by_assortment_href(href)
-        if available is None:
-            available = 0
+        # Берём остаток по этому href из заранее собранного словаря
+        available = stock_by_href.get(href, 0)
 
         try:
             available = int(available)
@@ -97,7 +97,8 @@ def compute_bundle_available(bundle_row: dict) -> int:
         if qty_required <= 0:
             qty_required = 1
 
-        amounts.append(available // qty_required)
+        # Сколько комплектов можно собрать из этого компонента
+        amounts.append(max(0, available) // qty_required)
 
     if not amounts:
         return 0
