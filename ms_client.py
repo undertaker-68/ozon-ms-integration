@@ -32,6 +32,56 @@ if not MS_OZON_STORE_ID:
 MS_OZON_STORE_HREF = f"{BASE_URL}/entity/store/{MS_OZON_STORE_ID}"
 MS_BASE_URL = BASE_URL
 
+def _ms_get_by_href(href: str) -> dict:
+    """
+    Запрос по прямому href объекта в МойСклад.
+    Использует общий клиент request_ms.
+    """
+    try:
+        return request_ms("GET", href)
+    except Exception:
+        return {}
+
+def compute_bundle_available(bundle_row: dict) -> int:
+    """
+    Рассчитывает количество доступных комплектов.
+    Формула: min(available(component_i) // required_qty_i)
+
+    bundle_row – строка ассортимента комплекта, включающая components.
+    """
+    components = bundle_row.get("components") or []
+    if not components:
+        return 0
+
+    amounts = []
+
+    for comp in components:
+        qty_required = comp.get("quantity", 1)
+
+        assort = comp.get("assortment", {}).get("meta", {})
+        href = assort.get("href")
+        if not href:
+            continue
+
+        comp_data = _ms_get_by_href(href)
+
+        # Берём 'available' — если нет, fallback на 'stock'
+        available = comp_data.get("available")
+        if available is None:
+            available = comp_data.get("stock", 0)
+
+        try:
+            available = int(available)
+        except:
+            available = 0
+
+        # Сколько комплектов может дать этот компонент
+        amounts.append(available // qty_required)
+
+    if not amounts:
+        return 0
+
+    return max(min(amounts), 0)
 
 # ==========================
 # ВСПОМОГАТЕЛЬНЫЙ GET
