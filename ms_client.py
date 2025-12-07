@@ -21,7 +21,8 @@ MS_AUTH = base64.b64encode(f"{MS_LOGIN}:{MS_PASSWORD}".encode("utf-8")).decode("
 
 HEADERS = {
     "Authorization": f"Basic {MS_AUTH}",
-    "Accept": "application/json",
+    "Accept": "application/json;charset=utf-8",
+    "Accept-Encoding": "gzip",
     "Content-Type": "application/json",
 }
 
