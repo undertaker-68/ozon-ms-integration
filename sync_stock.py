@@ -225,16 +225,17 @@ def build_ozon_stocks_from_ms() -> Tuple[List[dict], List[dict], int, List[dict]
                 {
                     "offer_id": article,
                     "stock": stock,
-                    "warehouse_id": ozon_wh_id,
+                    "warehouse_id": ozon_wh_id,  # первый кабинет – по карте WAREHOUSE_MAP
                 }
             )
 
         if send_to_ozon2:
+            wh2 = OZON2_WAREHOUSE_ID if OZON2_WAREHOUSE_ID is not None else ozon_wh_id
             stocks_ozon2.append(
                 {
                     "offer_id": article,
                     "stock": stock,
-                    "warehouse_id": ozon_wh_id,
+                    "warehouse_id": wh2,  # второй кабинет – либо отдельный ID, либо тот же
                 }
             )
 
