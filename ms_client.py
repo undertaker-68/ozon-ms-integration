@@ -16,7 +16,7 @@ MS_PASSWORD = os.getenv("MS_PASSWORD")
 if not MS_LOGIN or not MS_PASSWORD:
     raise RuntimeError("Не заданы MS_LOGIN / MS_PASSWORD в .env")
 
-BASE_URL = "https://online.moysklad.ru/api/remap/1.2"
+BASE_URL = "https://api.moysklad.ru/api/remap/1.2"
 MS_AUTH = base64.b64encode(f"{MS_LOGIN}:{MS_PASSWORD}".encode("utf-8")).decode("utf-8")
 
 HEADERS = {
