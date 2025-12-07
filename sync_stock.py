@@ -158,7 +158,7 @@ def build_ozon_stocks_from_ms() -> Tuple[List[dict], List[dict], int, List[dict]
             meta = row.get("meta") or {}
             item_type = meta.get("type")
 
-                    if item_type == "bundle":
+        if item_type == "bundle":
             # Для комплектов считаем доступный остаток по компонентам
             stock_int = compute_bundle_available(row)
         else:
