@@ -56,6 +56,7 @@ def _parse_warehouse_map() -> Dict[str, int]:
             pair = pair.strip()
             if not pair:
                 continue
+
             try:
                 ms_store_id, ozon_wh_id = pair.split(":", 1)
                 warehouse_map[ms_store_id.strip()] = int(ozon_wh_id.strip())
@@ -136,6 +137,35 @@ def build_ozon_stocks_from_ms() -> Tuple[List[dict], List[dict], int, List[dict]
 
         rows = _fetch_ms_stock_rows_for_store(ms_store_id)
 
+        # Строим карту остатков по href ассортимента для ЭТОГО склада
+        stock_by_href: Dict[str, int] = {}
+        for r in rows:
+            href = None
+
+            # Пытаемся взять href из r["assortment"]["meta"]["href"]
+            assort = r.get("assortment")
+            if isinstance(assort, dict):
+                meta = assort.get("meta") or {}
+                href = meta.get("href")
+
+            # Если не нашли – пробуем r["meta"]["href"]
+            if not href:
+                meta = r.get("meta") or {}
+                href = meta.get("href")
+
+            if not href:
+                continue
+
+            stock_raw = r.get("quantity")
+            if stock_raw is None:
+                stock_raw = r.get("stock", 0)
+
+            try:
+                stock_by_href[href] = int(stock_raw)
+            except Exception:
+                stock_by_href[href] = 0
+
+        # Теперь обрабатываем каждую строку и считаем stock_int
         for row in rows:
             article_raw = row.get("article")
             if not article_raw:
@@ -159,8 +189,14 @@ def build_ozon_stocks_from_ms() -> Tuple[List[dict], List[dict], int, List[dict]
             item_type = meta.get("type")
 
             if item_type == "bundle":
-                # Для комплектов считаем доступный остаток по компонентам
-                stock_int = compute_bundle_available(row)
+                # Для комплектов считаем доступный остаток по компонентам,
+                # используя остатки по этому складу из stock_by_href
+                try:
+                    stock_int = compute_bundle_available(row, stock_by_href)
+                except TypeError:
+                    # Если compute_bundle_available ещё со старой сигнатурой (1 аргумент) –
+                    # не падаем, но такие комплекты считаем недоступными.
+                    stock_int = 0
             else:
                 # Для обычных товаров сначала пробуем 'quantity' (Доступно),
                 # если его нет – fallback на 'stock'
@@ -219,10 +255,12 @@ def build_ozon_stocks_from_ms() -> Tuple[List[dict], List[dict], int, List[dict]
             skipped_count += 1
             continue
 
-        send_to_ozon1 = (st1_state == "ACTIVE")
-        send_to_ozon2 = (st2_state == "ACTIVE")
+        # В Ozon1 отправляем только те, что либо активны, либо есть в кабинете
+        send_to_ozon1 = st1_state is not None and st1_state != "ARCHIVED"
 
-        # Если в кабинетах только ARCHIVED/None – пропускаем
+        # Во второй кабинет аналогично, плюс учитываем переключатель ENABLE_OZON2_STOCKS
+        send_to_ozon2 = ENABLE_OZON2_STOCKS and st2_state is not None and st2_state != "ARCHIVED"
+
         if not send_to_ozon1 and not send_to_ozon2:
             skipped_count += 1
             continue
