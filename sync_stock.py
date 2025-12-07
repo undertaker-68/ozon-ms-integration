@@ -155,7 +155,7 @@ def build_ozon_stocks_from_ms() -> Tuple[List[dict], List[dict], int, List[dict]
             )
 
             # Определяем тип ассортимента: обычный товар или комплект (bundle)
-                        meta = row.get("meta") or {}
+            meta = row.get("meta") or {}
             item_type = meta.get("type")
 
             if item_type == "bundle":
