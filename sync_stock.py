@@ -23,6 +23,12 @@ load_dotenv()
 # --------------------------
 
 DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
+# включение/выключение обновления второго кабинета (по желанию)
+ENABLE_OZON2_STOCKS = os.getenv("ENABLE_OZON2_STOCKS", "true").lower() == "true"
+
+# отдельный склад для второго кабинета
+OZON2_WAREHOUSE_ID_ENV = os.getenv("OZON2_WAREHOUSE_ID")
+OZON2_WAREHOUSE_ID = int(OZON2_WAREHOUSE_ID_ENV) if OZON2_WAREHOUSE_ID_ENV else None
 
 
 def _parse_ignore_offers() -> Set[str]:
