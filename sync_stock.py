@@ -1,4 +1,3 @@
-# sync_stock.py
 import os
 import csv
 import tempfile
@@ -15,7 +14,6 @@ from ozon_client2 import (
     get_products_state_by_offer_ids as get_products_state_by_offer_ids_ozon2,
     update_stocks as update_stocks_ozon2,
 )
-
 from notifier import send_telegram_message, send_telegram_document
 
 load_dotenv()
@@ -185,12 +183,18 @@ def build_ozon_stocks_from_ms() -> Tuple[List[dict], List[dict], int, List[dict]
     offer_ids = sorted({article for article, _, _ in candidates})
 
     print(f"[OZON] Запрашиваем статусы {len(offer_ids)} товаров (кабинет 1)...")
-    states_ozon1 = get_products_state_by_offer_ids_ozon1(offer_ids)
+    states_ozon1_raw = get_products_state_by_offer_ids_ozon1(offer_ids)
     print(f"[OZON2] Запрашиваем статусы {len(offer_ids)} товаров (кабинет 2)...")
-    states_ozon2 = get_products_state_by_offer_ids_ozon2(offer_ids)
+    states_ozon2_raw = get_products_state_by_offer_ids_ozon2(offer_ids)
 
-    state_by_offer_ozon1: Dict[str, dict] = {normalize_article(s["offer_id"]): s for s in states_ozon1}
-    state_by_offer_ozon2: Dict[str, dict] = {normalize_article(s["offer_id"]): s for s in states_ozon2}
+    # get_products_state_by_offer_ids возвращает словарь { offer_id: "ACTIVE"/"ARCHIVED"/None }
+    # Нормализуем ключи так же, как артикула из МойСклад
+    state_by_offer_ozon1: Dict[str, str | None] = {
+        normalize_article(oid): state for oid, state in (states_ozon1_raw or {}).items()
+    }
+    state_by_offer_ozon2: Dict[str, str | None] = {
+        normalize_article(oid): state for oid, state in (states_ozon2_raw or {}).items()
+    }
 
     # ---------- Фильтруем кандидатов по статусам в кабинетах ----------
 
@@ -200,24 +204,18 @@ def build_ozon_stocks_from_ms() -> Tuple[List[dict], List[dict], int, List[dict]
     report_rows: List[dict] = []
 
     for article, stock, ozon_wh_id in candidates:
-        st1 = state_by_offer_ozon1.get(article)
-        st2 = state_by_offer_ozon2.get(article)
+        st1_state = state_by_offer_ozon1.get(article)
+        st2_state = state_by_offer_ozon2.get(article)
 
         # Если нет ни в одном кабинете – пропускаем
-        if not st1 and not st2:
+        if st1_state is None and st2_state is None:
             skipped_count += 1
             continue
 
-        # Если в кабинете товар есть, но в архиве – тоже пропускаем
-        send_to_ozon1 = False
-        send_to_ozon2 = False
+        send_to_ozon1 = (st1_state == "ACTIVE")
+        send_to_ozon2 = (st2_state == "ACTIVE")
 
-        if st1 and not st1.get("archived", False):
-            send_to_ozon1 = True
-
-        if st2 and not st2.get("archived", False):
-            send_to_ozon2 = True
-
+        # Если в кабинетах только ARCHIVED/None – пропускаем
         if not send_to_ozon1 and not send_to_ozon2:
             skipped_count += 1
             continue
