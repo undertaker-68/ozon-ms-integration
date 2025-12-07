@@ -84,12 +84,10 @@ def compute_bundle_available(bundle_row: dict) -> int:
         if not href:
             continue
 
-        comp_data = _ms_get_by_href(href) or {}
-
-        # Берём 'available' — если нет, fallback на 'stock'
-        available = comp_data.get("available")
+        # ✅ Берём остаток по КОНКРЕТНОМУ складу (MS_OZON_STORE_HREF)
+        available = get_stock_by_assortment_href(href)
         if available is None:
-            available = comp_data.get("stock", 0)
+            available = 0
 
         try:
             available = int(available)
@@ -108,10 +106,6 @@ def compute_bundle_available(bundle_row: dict) -> int:
     if result < 0:
         result = 0
     return result
-
-# ==========================
-# УТИЛИТЫ
-# ==========================
 
 def _ms_get(url: str, params: dict | None = None) -> dict:
     """
