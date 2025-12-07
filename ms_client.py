@@ -44,13 +44,13 @@ def _ms_get_by_href(href: str) -> dict:
     except Exception:
         return {}
 
-
 def compute_bundle_available(bundle_row: dict) -> int:
     """
     Рассчитывает количество доступных комплектов.
     Формула: min(available(component_i) // required_qty_i)
 
     bundle_row – строка ассортимента комплекта, включающая components.
+    Структура components бывает разной: элементы могут быть dict или str (href).
     """
     components = bundle_row.get("components") or []
     if not components:
@@ -59,14 +59,32 @@ def compute_bundle_available(bundle_row: dict) -> int:
     amounts = []
 
     for comp in components:
-        qty_required = comp.get("quantity", 1)
+        qty_required = 1
+        href = None
 
-        assort = comp.get("assortment", {}).get("meta", {})
-        href = assort.get("href")
+        # Вариант 1: компонент – словарь
+        if isinstance(comp, dict):
+            qty_required = comp.get("quantity", 1) or 1
+
+            assort = comp.get("assortment")
+            if isinstance(assort, dict):
+                meta = assort.get("meta", assort)
+                if isinstance(meta, dict):
+                    href = meta.get("href")
+            elif isinstance(assort, str):
+                # Иногда assortment может быть сразу href строкой
+                href = assort
+
+        # Вариант 2: компонент – просто href строкой
+        elif isinstance(comp, str):
+            href = comp
+            qty_required = 1
+
+        # Если так и не получили href – пропускаем компонент
         if not href:
             continue
 
-        comp_data = _ms_get_by_href(href)
+        comp_data = _ms_get_by_href(href) or {}
 
         # Берём 'available' — если нет, fallback на 'stock'
         available = comp_data.get("available")
@@ -78,14 +96,18 @@ def compute_bundle_available(bundle_row: dict) -> int:
         except Exception:
             available = 0
 
-        # Сколько комплектов может дать этот компонент
+        if qty_required <= 0:
+            qty_required = 1
+
         amounts.append(available // qty_required)
 
     if not amounts:
         return 0
 
-    return max(min(amounts), 0)
-
+    result = min(amounts)
+    if result < 0:
+        result = 0
+    return result
 
 # ==========================
 # УТИЛИТЫ
