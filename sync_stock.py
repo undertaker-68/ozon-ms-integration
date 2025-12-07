@@ -155,22 +155,23 @@ def build_ozon_stocks_from_ms() -> Tuple[List[dict], List[dict], int, List[dict]
             )
 
             # Определяем тип ассортимента: обычный товар или комплект (bundle)
-            meta = row.get("meta") or {}
+                        meta = row.get("meta") or {}
             item_type = meta.get("type")
 
-        if item_type == "bundle":
-            # Для комплектов считаем доступный остаток по компонентам
-            stock_int = compute_bundle_available(row)
-        else:
-            # Для обычных товаров сначала пробуем 'quantity' (Доступно), если его нет – 'stock'
-            stock_raw = row.get("quantity")
-            if stock_raw is None:
-                stock_raw = row.get("stock", 0)
+            if item_type == "bundle":
+                # Для комплектов считаем доступный остаток по компонентам
+                stock_int = compute_bundle_available(row)
+            else:
+                # Для обычных товаров сначала пробуем 'quantity' (Доступно),
+                # если его нет – fallback на 'stock'
+                stock_raw = row.get("quantity")
+                if stock_raw is None:
+                    stock_raw = row.get("stock", 0)
 
-            try:
-                stock_int = int(stock_raw)
-            except Exception:
-                stock_int = 0
+                try:
+                    stock_int = int(stock_raw)
+                except Exception:
+                    stock_int = 0
 
             if stock_int < 0:
                 stock_int = 0
