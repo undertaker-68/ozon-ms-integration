@@ -23,10 +23,8 @@ load_dotenv()
 # --------------------------
 
 DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
-# включение/выключение обновления второго кабинета (по желанию)
 ENABLE_OZON2_STOCKS = os.getenv("ENABLE_OZON2_STOCKS", "true").lower() == "true"
 
-# отдельный склад для второго кабинета (только warehouse_id, склад MS тот же)
 OZON2_WAREHOUSE_ID_ENV = os.getenv("OZON2_WAREHOUSE_ID")
 OZON2_WAREHOUSE_ID = int(OZON2_WAREHOUSE_ID_ENV) if OZON2_WAREHOUSE_ID_ENV else None
 
@@ -100,6 +98,37 @@ def normalize_article(article: str) -> str:
     return str(article).strip()
 
 
+def _ms_calc_available(row: dict) -> int:
+    """
+    Вычисляем передаваемый остаток по формуле:
+      Остаток = stock - reserve
+
+    Поля МойСклад:
+      stock   — «Остаток» по выбранному складу
+      reserve — «Резерв» по выбранному складу
+
+    Поля quantity / inTransit / ожидание НЕ используем.
+    """
+    stock_raw = row.get("stock")
+    reserve_raw = row.get("reserve", 0)
+
+    try:
+        stock_val = int(stock_raw or 0)
+    except Exception:
+        stock_val = 0
+
+    try:
+        reserve_val = int(reserve_raw or 0)
+    except Exception:
+        reserve_val = 0
+
+    available = stock_val - reserve_val
+    if available < 0:
+        available = 0
+
+    return available
+
+
 def _fetch_ms_stock_rows_for_store(store_id: str) -> List[dict]:
     """
     Читаем все строки ассортимента по складу store_id.
@@ -134,8 +163,6 @@ def build_ozon_stocks_from_ms() -> Tuple[List[dict], List[dict], int, List[dict]
       skipped_count  – сколько позиций отфильтровано (архив/нет в Ozon)
       report_rows    – строки для CSV-отчёта
     """
-    # ---------- Собираем кандидатов из МойСклад ----------
-
     candidates: List[Tuple[str, int, int]] = []  # (article, stock_int, ozon_wh_id)
     names_by_article: Dict[str, str] = {}
 
@@ -167,24 +194,7 @@ def build_ozon_stocks_from_ms() -> Tuple[List[dict], List[dict], int, List[dict]
                 continue
 
             # Остаток компонента по формуле: stock - reserve
-            stock_val = r.get("stock")
-            reserve_val = r.get("reserve", 0)
-
-            try:
-                stock_int = int(stock_val or 0)
-            except Exception:
-                stock_int = 0
-
-            try:
-                reserve_int = int(reserve_val or 0)
-            except Exception:
-                reserve_int = 0
-
-            available = stock_int - reserve_int
-            if available < 0:
-                available = 0
-
-            stock_by_href[href] = available
+            stock_by_href[href] = _ms_calc_available(r)
 
         # Теперь обрабатываем каждую строку и считаем stock_int
         for row in rows:
@@ -219,17 +229,8 @@ def build_ozon_stocks_from_ms() -> Tuple[List[dict], List[dict], int, List[dict]
                     # не падаем, но такие комплекты считаем недоступными.
                     stock_int = 0
             else:
-                # Для обычных товаров – старая логика:
-                # сначала используем quantity (Доступно),
-                # если его нет – fallback на stock.
-                stock_raw = row.get("quantity")
-                if stock_raw is None:
-                    stock_raw = row.get("stock", 0)
-
-                try:
-                    stock_int = int(stock_raw)
-                except Exception:
-                    stock_int = 0
+                # Для обычных товаров считаем по формуле: stock - reserve
+                stock_int = _ms_calc_available(row)
 
             if stock_int < 0:
                 stock_int = 0
@@ -251,7 +252,6 @@ def build_ozon_stocks_from_ms() -> Tuple[List[dict], List[dict], int, List[dict]
     states_ozon1_raw = get_products_state_by_offer_ids_ozon1(all_offer_ids)
     states_ozon2_raw = get_products_state_by_offer_ids_ozon2(all_offer_ids)
 
-    # ожидаем словарь offer_id -> state или None
     state_by_offer_ozon1: Dict[str, str | None] = {
         normalize_article(oid): state
         for oid, state in (states_ozon1_raw or {}).items()
@@ -277,10 +277,7 @@ def build_ozon_stocks_from_ms() -> Tuple[List[dict], List[dict], int, List[dict]
             skipped_count += 1
             continue
 
-        # В Ozon1 отправляем только те, что либо активны, либо есть в кабинете
         send_to_ozon1 = st1_state is not None and st1_state != "ARCHIVED"
-
-        # Во второй кабинет аналогично, плюс учитываем переключатель ENABLE_OZON2_STOCKS
         send_to_ozon2 = (
             ENABLE_OZON2_STOCKS
             and st2_state is not None
