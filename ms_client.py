@@ -47,60 +47,30 @@ def _ms_get_by_href(href: str) -> dict:
         return {}
 
 
-def _extract_components(obj: dict) -> list[dict]:
-    """
-    Достаём массив components из разных вариантов структуры:
-      - "components": [ ... ]
-      - "components": {"rows": [ ... ]}
-    """
-    if not isinstance(obj, dict):
-        return []
-
-    comps = obj.get("components")
-    if isinstance(comps, list):
-        return comps
-    if isinstance(comps, dict):
-        rows = comps.get("rows")
-        if isinstance(rows, list):
-            return rows
-    return []
-
-
 def compute_bundle_available(bundle_row: dict, stock_by_href: dict[str, int]) -> int:
     """
-    Рассчитывает количество доступных комплектов по формуле:
-      Остаток комплекта = min(остаток_компонента_i / требуемое_кол-во_i)
+    Рассчитывает количество доступных комплектов.
+    Формула: min(available(component_i) // required_qty_i)
 
-    Для каждого компонента в stock_by_href уже лежит Остаток - Резерв
-    по нужному складу, «Ожидание»/quantity не используется.
+    bundle_row – строка ассортимента комплекта.
+    В ответе /entity/assortment с expand=assortment компоненты обычно лежат
+    во вложенном объекте bundle_row["assortment"]["components"].
+
+    stock_by_href – словарь {assortment.meta.href -> доступный остаток по КОНКРЕТНОМУ складу}
+    (остаток компонента уже посчитан как stock - reserve).
     """
-    # 1) Пытаемся взять components прямо из строки ассортимента
-    components = _extract_components(bundle_row)
-
-    # 2) Если пусто – пробуем взять из expand=assortment
+    components = bundle_row.get("components")
+    # В /entity/assortment обычно состав комплекта лежит во вложенном объекте assortment
     if not components:
         assort = bundle_row.get("assortment")
         if isinstance(assort, dict):
-            components = _extract_components(assort)
-
-    # 3) Если всё ещё пусто – грузим сам комплект по href
-    if not components:
-        href = None
-        assort = bundle_row.get("assortment")
-        if isinstance(assort, dict):
-            meta = assort.get("meta") or {}
-            href = meta.get("href")
-
-        if not href:
-            meta = bundle_row.get("meta") or {}
-            href = meta.get("href")
-
-        if href:
-            bundle_data = _ms_get_by_href(href)
-            components = _extract_components(bundle_data)
+            comps = assort.get("components")
+            if isinstance(comps, dict):
+                components = comps.get("rows") or []
+            elif isinstance(comps, list):
+                components = comps or []
 
     if not components:
-        # Нет состава – считаем, что остаток комплекта 0
         return 0
 
     amounts: list[int] = []
@@ -161,9 +131,7 @@ def _ms_get(url: str, params: dict | None = None) -> dict:
     """
     r = requests.get(url, headers=HEADERS, params=params, timeout=30)
     if r.status_code >= 400:
-        print(
-            f"[MS GET ERROR] {r.url} status={r.status_code} body={r.text[:500]}"
-        )
+        print(f"[MS GET ERROR] {r.url} status={r.status_code} body={r.text[:500]}")
     r.raise_for_status()
     return r.json()
 
@@ -174,9 +142,7 @@ def _ms_post(url: str, json_data: dict) -> dict:
     """
     r = requests.post(url, headers=HEADERS, json=json_data, timeout=30)
     if r.status_code >= 400:
-        print(
-            f"[MS POST ERROR] {r.url} status={r.status_code} body={r.text[:500]}"
-        )
+        print(f"[MS POST ERROR] {r.url} status={r.status_code} body={r.text[:500]}")
     r.raise_for_status()
     return r.json()
 
@@ -187,60 +153,48 @@ def _ms_put(url: str, json_data: dict) -> dict:
     """
     r = requests.put(url, headers=HEADERS, json=json_data, timeout=30)
     if r.status_code >= 400:
-        print(
-            f"[MS PUT ERROR] {r.url} status={r.status_code} body={r.text[:500]}"
-        )
+        print(f"[MS PUT ERROR] {r.url} status={r.status_code} body={r.text[:500]}")
     r.raise_for_status()
     return r.json()
 
 
-# ==========================
-# ПОИСК ТОВАРОВ / КОНТРАГЕНТОВ
-# ==========================
+def _ms_get_list(url: str, params: dict | None = None) -> list[dict]:
+    """
+    Получить постранично список сущностей.
+    """
+    limit = params.get("limit", 1000) if params else 1000
+    offset = params.get("offset", 0) if params else 0
 
-def find_product_by_article(article: str) -> dict | None:
-    """
-    Найти товар по артикулу через /entity/assortment.
-    """
-    url = f"{BASE_URL}/entity/assortment"
-    params = {
-        "filter": f"article={article}",
-        "limit": 1,
-    }
-    data = _ms_get(url, params)
-    rows = data.get("rows") or []
-    if not rows:
-        return None
-    return rows[0]
+    items: list[dict] = []
 
+    while True:
+        p = dict(params or {})
+        p["limit"] = limit
+        p["offset"] = offset
 
-def find_counterparty_by_name_or_phone(query: str) -> dict | None:
-    """
-    Найти контрагента по имени или телефону.
-    """
-    url = f"{BASE_URL}/entity/counterparty"
-    params = {
-        "search": query,
-        "limit": 1,
-    }
-    data = _ms_get(url, params)
-    rows = data.get("rows") or []
-    if not rows:
-        return None
-    return rows[0]
+        data = _ms_get(url, p)
+        rows = data.get("rows") or []
+        if not rows:
+            break
+
+        items.extend(rows)
+
+        if len(rows) < limit:
+            break
+
+        offset += limit
+
+    return items
 
 
 # ==========================
-# ОСТАТКИ (ОТЧЁТЫ)
+# ОСТАТКИ (ОТЧЁТЫ / ЕДИНИЧНЫЕ ЗАПРОСЫ)
 # ==========================
 
 def get_stock_by_assortment_href(assortment_href: str) -> int | None:
     """
     Получить текущий остаток товара по meta.href ассортимента
-    через отчёт /report/stock/all ТОЛЬКО по складу Ozon.
-
-    Здесь оставляем старое поведение: берём поле available (если есть),
-    иначе stock. Это никак не влияет на массовый sync остатков.
+    через отчет /report/stock/all ТОЛЬКО по складу Ozon.
     """
     url = f"{BASE_URL}/report/stock/all"
     params = {
@@ -254,6 +208,8 @@ def get_stock_by_assortment_href(assortment_href: str) -> int | None:
         return None
 
     row = rows[0]
+    # В отчёте stock/all есть поля stock, quantity, reserve, available и т.п.
+    # Нас интересует доступный остаток.
     available = row.get("available")
     if available is None:
         available = row.get("stock", 0)
@@ -290,14 +246,10 @@ def get_stock_by_article(article: str) -> int | None:
         return 0
 
 
-def get_stock_all(
-    limit: int = 1000, offset: int = 0, store_id: str | None = None
-) -> dict:
+def get_stock_all(limit: int = 1000, offset: int = 0, store_id: str | None = None) -> dict:
     """
     Обёртка над /entity/assortment, которая подставляет склад (stockStore)
     и отдаёт «сырые» данные, чтобы sync_stock сам их разобрал.
-
-    Здесь мы НИЧЕГО не считаем, просто возвращаем результат.
     """
     url = f"{BASE_URL}/entity/assortment"
     params: dict = {
@@ -313,6 +265,42 @@ def get_stock_all(
 
     data = _ms_get(url, params)
     return data
+
+
+# ==========================
+# ПОИСК ТОВАРОВ / КОНТРАГЕНТОВ
+# ==========================
+
+def find_product_by_article(article: str) -> dict | None:
+    """
+    Найти товар по артикулу через /entity/assortment.
+    """
+    url = f"{BASE_URL}/entity/assortment"
+    params = {
+        "filter": f"article={article}",
+        "limit": 1,
+    }
+    data = _ms_get(url, params)
+    rows = data.get("rows") or []
+    if not rows:
+        return None
+    return rows[0]
+
+
+def find_counterparty_by_name_or_phone(query: str) -> dict | None:
+    """
+    Найти контрагента по имени или телефону.
+    """
+    url = f"{BASE_URL}/entity/counterparty"
+    params = {
+        "search": query,
+        "limit": 1,
+    }
+    data = _ms_get(url, params)
+    rows = data.get("rows") or []
+    if not rows:
+        return None
+    return rows[0]
 
 
 # ==========================
@@ -403,9 +391,7 @@ def create_demand_from_order(order: dict) -> dict:
     demand_payload["positions"] = fixed_positions
 
     url = f"{BASE_URL}/entity/demand"
-    r_post = requests.post(
-        url, headers=HEADERS, json=demand_payload, timeout=30
-    )
+    r_post = requests.post(url, headers=HEADERS, json=demand_payload, timeout=30)
     if r_post.status_code >= 400:
         print(
             f"[MS ERROR] create_demand status={r_post.status_code} body={r_post.text[:500]}"
