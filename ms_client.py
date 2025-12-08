@@ -341,38 +341,66 @@ def clear_reserve_for_order(order_href: str) -> None:
     }
     _ms_put(order_href, payload)
 
-def create_demand_from_order(order: dict) -> dict:
+def create_demand_from_order(order_href: str) -> dict:
     """
-    Создаём отгрузку (demand) на основании заказа покупателя.
-    ВНИМАНИЕ: /entity/demand/new больше не существует.
-    Поэтому формируем документ вручную.
+    Создать отгрузку (demand) на основании уже существующего заказа покупателя.
+
+    order_href – это meta.href заказа вида:
+    https://api.moysklad.ru/api/remap/1.2/entity/customerorder/{uuid}
     """
-    order_meta = order.get("meta", {})
-    order_positions_href = order_meta.get("href") + "/positions"
+    # 1. Читаем позиции заказа
+    positions_url = f"{order_href}/positions"
+    positions_data = _ms_get(positions_url, {"expand": "assortment"})
+    rows = positions_data.get("rows") or []
 
-    # 1) Получаем позиции заказа
-    pos_data = _ms_get(order_positions_href)
-    positions_rows = pos_data.get("rows") or []
+    positions_payload: list[dict] = []
+    for pos in rows:
+        positions_payload.append(
+            {
+                "quantity": pos.get("quantity", 0),
+                "assortment": pos.get("assortment"),
+            }
+        )
 
-    demand_positions = []
-    for pos in positions_rows:
-        assort = pos.get("assortment", {})
-        demand_positions.append({
-            "quantity": pos.get("quantity", 0),
-            "assortment": assort
-        })
-
-    # 2) Формируем payload для отгрузки
-    payload = {
+    # 2. Собираем payload отгрузки
+    demand_payload = {
         "customerOrder": {
-            "meta": order_meta
+            "meta": {
+                "href": order_href,
+                "type": "customerorder",
+                "mediaType": "application/json",
+            }
         },
-        "organization": order.get("organization"),
-        "agent": order.get("agent"),
-        "store": order.get("store"),
-        "positions": demand_positions,
+        "organization": {
+            "meta": {
+                "href": MS_ORGANIZATION_HREF,
+                "type": "organization",
+                "mediaType": "application/json",
+            }
+        },
+        "agent": {
+            "meta": {
+                "href": MS_AGENT_HREF,
+                "type": "counterparty",
+                "mediaType": "application/json",
+            }
+        },
+        "store": {
+            "meta": {
+                "href": MS_STORE_HREF,
+                "type": "store",
+                "mediaType": "application/json",
+            }
+        },
+        "positions": positions_payload,
     }
 
-    # 3) Создаём отгрузку
+    # 3. Создаём отгрузку
     url = f"{BASE_URL}/entity/demand"
-    return _ms_post(url, payload)
+    r_post = requests.post(url, headers=HEADERS, json=demand_payload, timeout=30)
+    if r_post.status_code >= 400:
+        print(
+            f"[MS ERROR] create_demand status={r_post.status_code} body={r_post.text[:500]}"
+        )
+    r_post.raise_for_status()
+    return r_post.json()
