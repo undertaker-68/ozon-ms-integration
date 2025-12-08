@@ -341,34 +341,38 @@ def clear_reserve_for_order(order_href: str) -> None:
     }
     _ms_put(order_href, payload)
 
-
 def create_demand_from_order(order: dict) -> dict:
     """
-    Создать отгрузку (demand) на основании заказа покупателя.
+    Создаём отгрузку (demand) на основании заказа покупателя.
+    ВНИМАНИЕ: /entity/demand/new больше не существует.
+    Поэтому формируем документ вручную.
     """
-    url = f"{BASE_URL}/entity/demand/new"
-    params = {
-        "customerOrder": order.get("meta", {}).get("href"),
+    order_meta = order.get("meta", {})
+    order_positions_href = order_meta.get("href") + "/positions"
+
+    # 1) Получаем позиции заказа
+    pos_data = _ms_get(order_positions_href)
+    positions_rows = pos_data.get("rows") or []
+
+    demand_positions = []
+    for pos in positions_rows:
+        assort = pos.get("assortment", {})
+        demand_positions.append({
+            "quantity": pos.get("quantity", 0),
+            "assortment": assort
+        })
+
+    # 2) Формируем payload для отгрузки
+    payload = {
+        "customerOrder": {
+            "meta": order_meta
+        },
+        "organization": order.get("organization"),
+        "agent": order.get("agent"),
+        "store": order.get("store"),
+        "positions": demand_positions,
     }
-    data = _ms_get(url, params)
 
-    demand_payload = data
-    positions = demand_payload.get("positions") or []
-    fixed_positions = []
-    for pos in positions:
-        fixed_positions.append(
-            {
-                "quantity": pos.get("quantity", 0),
-                "assortment": pos.get("assortment"),
-            }
-        )
-    demand_payload["positions"] = fixed_positions
-
+    # 3) Создаём отгрузку
     url = f"{BASE_URL}/entity/demand"
-    r_post = requests.post(url, headers=HEADERS, json=demand_payload, timeout=30)
-    if r_post.status_code >= 400:
-        print(
-            f"[MS ERROR] create_demand status={r_post.status_code} body={r_post.text[:500]}"
-        )
-    r_post.raise_for_status()
-    return r_post.json()
+    return _ms_post(url, payload)
