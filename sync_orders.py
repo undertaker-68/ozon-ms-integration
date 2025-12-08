@@ -264,27 +264,35 @@ def process_posting(posting: dict, dry_run: bool) -> None:
     existing = find_customer_order_by_name(order_name)
     if existing:
         print(f"[ORDERS] Заказ {order_name} уже существует в МойСклад.")
-        # обновляем статус (если есть)
         if state_meta_href:
             update_customer_order_state(existing["meta"]["href"], state_meta_href)
 
-        # если статус доставки — пытаемся создать отгрузку
+        # При delivering/delivered создаём отгрузку и для существующего заказа
         if status in ("delivering", "delivered"):
             try:
-                create_demand_from_order(existing["meta"]["href"])
+                # БЫЛО: create_demand_from_order(existing["meta"]["href"])
+                create_demand_from_order(existing)
             except Exception as e:
-                err_text = _format_ms_error(e)
-                _send_telegram_error(ozon_account, posting_number, err_text)
+                msg = (
+                    f"[ORDERS] Ошибка создания отгрузки для существующего заказа "
+                    f"{order_name}: {e!r}"
+                )
+                print(msg)
+                try:
+                    send_telegram_message(msg)
+                except Exception:
+                    pass
                 raise
         return
 
-    # Создаём новый заказ
+        # Создаём новый заказ
     created = create_customer_order(payload)
 
     # Если заказ уже в доставке/доставлен — сразу делаем отгрузку
     if status in ("delivering", "delivered"):
         try:
-            create_demand_from_order(created["meta"]["href"])
+            # БЫЛО: create_demand_from_order(created["meta"]["href"])
+            create_demand_from_order(created)
         except Exception as e:
             msg = f"[ORDERS] Ошибка создания отгрузки для заказа {order_name}: {e!r}"
             print(msg)
@@ -293,7 +301,6 @@ def process_posting(posting: dict, dry_run: bool) -> None:
             except Exception:
                 pass
             raise
-
 
 async def _sync_for_account(
     ozon_account: str,
