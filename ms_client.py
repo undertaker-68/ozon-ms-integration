@@ -16,110 +16,111 @@ MS_PASSWORD = os.getenv("MS_PASSWORD")
 if not MS_LOGIN or not MS_PASSWORD:
     raise RuntimeError("Не заданы MS_LOGIN / MS_PASSWORD в .env")
 
-MS_BASE_URL = os.getenv("MS_BASE_URL", "https://api.moysklad.ru/api/remap/1.2")
-BASE_URL = MS_BASE_URL.rstrip("/")
-
-MS_OZON_STORE_HREF = os.getenv("MS_OZON_STORE_HREF")  # опционально, для отчётов stock/all
-
-auth_str = f"{MS_LOGIN}:{MS_PASSWORD}"
-auth_bytes = auth_str.encode("utf-8")
-auth_b64 = base64.b64encode(auth_bytes).decode("utf-8")
+BASE_URL = "https://api.moysklad.ru/api/remap/1.2"
+MS_AUTH = base64.b64encode(f"{MS_LOGIN}:{MS_PASSWORD}".encode("utf-8")).decode("utf-8")
 
 HEADERS = {
-    "Authorization": f"Basic {auth_b64}",
-    "Content-Type": "application/json",
+    "Authorization": f"Basic {MS_AUTH}",
+    "Accept": "application/json;charset=utf-8",
     "Accept-Encoding": "gzip",
+    "Content-Type": "application/json",
 }
+
+MS_OZON_STORE_ID = os.getenv("MS_OZON_STORE_ID")
+if not MS_OZON_STORE_ID:
+    raise RuntimeError("Не задан MS_OZON_STORE_ID в .env")
+
+MS_OZON_STORE_HREF = f"{BASE_URL}/entity/store/{MS_OZON_STORE_ID}"
+MS_BASE_URL = BASE_URL
 
 
 # ==========================
-# БАЗОВЫЕ ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# БАЗОВЫЕ ВСПОМОГАТЕЛИ
 # ==========================
 
 def _ms_get(url: str, params: dict | None = None) -> dict:
     """
-    Универсальный GET к МойСклад.
+    Базовый GET к JSON API МойСклад.
     """
-    r = requests.get(url, headers=HEADERS, params=params, timeout=30)
-    if r.status_code >= 400:
-        print(f"[MS GET ERROR] {r.url} status={r.status_code} body={r.text[:500]}")
-    r.raise_for_status()
-    return r.json()
+    resp = requests.get(url, headers=HEADERS, params=params)
+    if not resp.ok:
+        raise RuntimeError(
+            f"MS GET {url} failed: {resp.status_code} {resp.text}"
+        )
+    return resp.json()
 
 
-def _ms_post(url: str, json_data: dict) -> dict:
+def _ms_get_by_href(href: str) -> dict:
     """
-    Универсальный POST к МойСклад.
+    Запрос по прямому href объекта в МойСклад.
+    Использует общий клиент _ms_get.
     """
-    r = requests.post(url, headers=HEADERS, json=json_data, timeout=30)
-    if r.status_code >= 400:
-        print(f"[MS POST ERROR] {r.url} status={r.status_code} body={r.text[:500]}")
-    r.raise_for_status()
-    return r.json()
-
-
-def _ms_put(url: str, json_data: dict) -> dict:
-    """
-    Универсальный PUT к МойСклад.
-    """
-    r = requests.put(url, headers=HEADERS, json=json_data, timeout=30)
-    if r.status_code >= 400:
-        print(f"[MS PUT ERROR] {r.url} status={r.status_code} body={r.text[:500]}")
-    r.raise_for_status()
-    return r.json()
+    try:
+        return _ms_get(href)
+    except Exception:
+        return {}
 
 
 # ==========================
-# ПОИСК ТОВАРОВ / КЛИЕНТОВ (фрагмент, который у тебя уже был)
+# РАСЧЁТ ДОСТУПНОГО ОСТАТКА
 # ==========================
 
-def find_product_by_article(article: str) -> dict | None:
+def _ms_calc_available(row: dict) -> int:
     """
-    Найти товар по артикулу через /entity/assortment.
-    """
-    url = f"{BASE_URL}/entity/assortment"
-    params = {
-        "filter": f"article={article}",
-        "limit": 1,
-    }
-    data = _ms_get(url, params)
-    rows = data.get("rows") or []
-    if not rows:
-        return None
-    return rows[0]
+    Унифицированный расчёт «передаваемого остатка»:
+    Переданный остаток = Остаток - Резерв
 
-
-def find_counterparty_by_name_or_phone(query: str) -> dict | None:
+    Поле "Ожидание" и "Доступно" не используем.
     """
-    Найти контрагента по имени или телефону.
-    """
-    url = f"{BASE_URL}/entity/counterparty"
-    params = {
-        "search": query,
-        "limit": 1,
-    }
-    data = _ms_get(url, params)
-    rows = data.get("rows") or []
-    if not rows:
-        return None
-    return rows[0]
+    stock = row.get("stock") or 0
+    reserve = row.get("reserve") or 0
+    try:
+        stock = int(stock)
+    except (TypeError, ValueError):
+        stock = 0
+    try:
+        reserve = int(reserve)
+    except (TypeError, ValueError):
+        reserve = 0
+    return max(stock - reserve, 0)
 
 
 # ==========================
 # КОМПЛЕКТЫ
 # ==========================
 
-def compute_bundle_available(bundle_row: dict, stock_by_href: dict[str, int]) -> int:
+def get_product_bundle_components(bundle_href: str) -> list[dict]:
     """
-    Рассчитывает количество доступных комплектов.
-    Формула: min(available(component_i) // required_qty_i)
-
-    bundle_row – строка ассортимента комплекта, включающая components.
-    Структура components бывает разной: элементы могут быть dict или str (href).
-
-    stock_by_href – словарь {assortment.meta.href -> доступный остаток по КОНКРЕТНОМУ складу}
+    Получение состава комплекта по href ассортимента (product / bundle).
+    Для обычного товара вернётся пустой список.
     """
-    components = bundle_row.get("components") or []
+    data = _ms_get_by_href(bundle_href)
+    if not data:
+        return []
+
+    components = data.get("components")
+    if isinstance(components, list):
+        return components
+
+    # Иногда компоненты лежат во вложенном объекте
+    if isinstance(components, dict):
+        rows = components.get("rows")
+        if isinstance(rows, list):
+            return rows
+
+    return []
+
+
+def calc_bundle_available_for_components(
+    components: list[dict],
+    stock_by_href: dict[str, int],
+) -> int:
+    """
+    Рассчитываем остаток комплекта по формуле:
+      Остаток комплекта = min( остаток_компонента_i / требуемое_кол-во_i )
+
+    stock_by_href — словарь вида {href товара: доступный остаток}
+    """
     if not components:
         return 0
 
@@ -152,41 +153,48 @@ def compute_bundle_available(bundle_row: dict, stock_by_href: dict[str, int]) ->
             continue
 
         # Берём остаток по этому href из заранее собранного словаря
-        available = stock_by_href.get(href, 0)
-
+        comp_stock = stock_by_href.get(href, 0)
         try:
-            available = int(available)
-        except Exception:
-            available = 0
+            qty_required = float(qty_required) if qty_required else 1.0
+        except (TypeError, ValueError):
+            qty_required = 1.0
 
         if qty_required <= 0:
-            qty_required = 1
+            # На всякий пожарный
+            qty_required = 1.0
 
-        amounts.append(available // qty_required)
+        amount = int(comp_stock // qty_required)
+        amounts.append(amount)
 
     if not amounts:
         return 0
 
-    return min(amounts)
+    return max(min(amounts), 0)
+
+
+def compute_bundle_available(bundle_row: dict, stock_by_href: dict[str, int]) -> int:
+    """
+    Высокоуровневый помощник:
+    на вход – строка ассортимента комплекта + словарь остатков по href,
+    на выход – доступный остаток комплекта по компоненту с наименьшим количеством.
+    """
+    meta = bundle_row.get("meta") or bundle_row.get("assortment", {}).get("meta") or {}
+    href = meta.get("href")
+    if not href:
+        return 0
+
+    components = get_product_bundle_components(href)
+    return calc_bundle_available_for_components(components, stock_by_href)
 
 
 # ==========================
 # ОСТАТКИ
 # ==========================
 
-def get_stock_by_assortment_href(assortment_href: str) -> int | None:
+def get_stock_by_assortment_href(assortment_href: str) -> dict | None:
     """
-    Получить текущий остаток товара по meta.href ассортимента
-    через отчёт /report/stock/all ТОЛЬКО по складу Ozon.
-
-    Формула:
-      Переданный остаток = Остаток - Резерв
-
-    Здесь:
-      stock   — поле «Остаток» в отчёте
-      reserve — поле «Резерв» в отчёте
-
-    Поля available / inTransit / quantity не используем.
+    Получить информацию по остаткам конкретной позиции ассортимента
+    через отчет /report/stock/all ТОЛЬКО по складу Ozon.
     """
     url = f"{BASE_URL}/report/stock/all"
     params = {
@@ -200,33 +208,16 @@ def get_stock_by_assortment_href(assortment_href: str) -> int | None:
         return None
 
     row = rows[0]
-
-    stock_raw = row.get("stock")
-    reserve_raw = row.get("reserve", 0)
-
-    try:
-        stock_val = int(stock_raw or 0)
-    except Exception:
-        stock_val = 0
-
-    try:
-        reserve_val = int(reserve_raw or 0)
-    except Exception:
-        reserve_val = 0
-
-    available = stock_val - reserve_val
-    if available < 0:
-        available = 0
-
-    return available
+    # В отчёте stock/all есть поля stock и reserve
+    available = _ms_calc_available(row)
+    row["available_for_ozon"] = available
+    return row
 
 
-def get_stock_by_article(article: str) -> int | None:
+def get_stock_by_article(article: str) -> dict | None:
     """
-    Получить остаток по артикулу (через отчёт /report/stock/all, по складу Ozon).
-
-    Формула:
-      Переданный остаток = Остаток - Резерв
+    Получить остатки по артикулу через отчёт /report/stock/all
+    по складу Ozon.
     """
     url = f"{BASE_URL}/report/stock/all"
     params = {
@@ -240,36 +231,23 @@ def get_stock_by_article(article: str) -> int | None:
         return None
 
     row = rows[0]
-
-    stock_raw = row.get("stock")
-    reserve_raw = row.get("reserve", 0)
-
-    try:
-        stock_val = int(stock_raw or 0)
-    except Exception:
-        stock_val = 0
-
-    try:
-        reserve_val = int(reserve_raw or 0)
-    except Exception:
-        reserve_val = 0
-
-    available = stock_val - reserve_val
-    if available < 0:
-        available = 0
-
-    return available
+    available = _ms_calc_available(row)
+    row["available_for_ozon"] = available
+    return row
 
 
 def get_stock_all(limit: int = 1000, offset: int = 0, store_id: str | None = None) -> dict:
     """
-    Обёртка над /entity/assortment, которая подставляет склад (stockStore)
-    и отдаёт «сырые» данные, чтобы sync_stock сам их разобрал.
+    Обёртка над /entity/assortment, которая подставляет склад
+    ЧЕРЕЗ ФИЛЬТР `filter=...;stockStore=<href>`.
 
     ВАЖНО:
-      Здесь мы не используем поля quantity / available внутри.
-      sync_stock сам считает остаток по формуле «Остаток - Резерв»
-      для каждой строки по выбранному складу.
+      параметр `stockStore` в корне query (?stockStore=...)
+      МойСклад игнорирует для ассортимента и возвращает суммарные
+      остатки по всем складам. Поэтому его больше не используем.
+
+    Здесь мы только подставляем фильтр по складу и возвращаем «сырые»
+    данные, а sync_stock сам посчитает Остаток - Резерв.
     """
     url = f"{BASE_URL}/entity/assortment"
     params: dict = {
@@ -278,93 +256,36 @@ def get_stock_all(limit: int = 1000, offset: int = 0, store_id: str | None = Non
         "expand": "assortment",
     }
 
+    # href нужного склада
     if store_id:
-        params["stockStore"] = f"{BASE_URL}/entity/store/{store_id}"
+        store_href = f"{BASE_URL}/entity/store/{store_id}"
     else:
-        params["stockStore"] = MS_OZON_STORE_HREF
+        store_href = MS_OZON_STORE_HREF
+
+    # аккуратно дописываем фильтр (если вдруг он уже был)
+    base_filter = params.get("filter")
+    if base_filter:
+        base_filter = f"{base_filter};stockStore={store_href}"
+    else:
+        base_filter = f"stockStore={store_href}"
+    params["filter"] = base_filter
 
     data = _ms_get(url, params)
     return data
 
 
 # ==========================
-# ЗАКАЗЫ / ОТГРУЗКИ
+# ЗАКАЗЫ / ОТГРУЗКИ (если есть)
 # ==========================
 
 def create_customer_order(payload: dict) -> dict:
     """
-    Создать заказ покупателя в МойСклад.
+    Пример обёртки создания Заказа покупателя (если вдруг нужно).
     """
     url = f"{BASE_URL}/entity/customerorder"
-    return _ms_post(url, payload)
-
-
-def update_customer_order(order_href: str, payload: dict) -> dict:
-    """
-    Обновить заказ покупателя (по meta.href).
-    """
-    url = order_href
-    return _ms_put(url, payload)
-
-
-def find_customer_order_by_name(name: str) -> dict | None:
-    """
-    Найти заказ покупателя по номеру (name).
-    """
-    url = f"{BASE_URL}/entity/customerorder"
-    params = {
-        "filter": f"name={name}",
-        "limit": 1,
-    }
-    data = _ms_get(url, params)
-    rows = data.get("rows") or []
-    if not rows:
-        return None
-    return rows[0]
-
-
-def update_customer_order_state(order_href: str, state_href: str) -> None:
-    """
-    Обновить состояние заказа покупателя.
-    """
-    payload = {
-        "state": {
-            "meta": {
-                "href": state_href,
-                "type": "state",
-                "mediaType": "application/json",
-            }
-        }
-    }
-    _ms_put(order_href, payload)
-
-
-def clear_reserve_for_order(order_href: str) -> None:
-    """
-    Снять резерв по всем позициям заказа.
-    """
-    payload = {
-        "positions": [],
-        "reservedSum": 0,
-    }
-    _ms_put(order_href, payload)
-
-
-def create_demand_from_order(order: dict) -> dict:
-    """
-    Создать отгрузку (demand) на основании заказа покупателя.
-    """
-    url = f"{BASE_URL}/entity/demand/new"
-    params = {
-        "customerOrder": order.get("meta", {}).get("href"),
-    }
-    data = _ms_get(url, params)
-
-    # Можем при необходимости поправить payload перед созданием.
-    demand_payload = data
-    url = f"{BASE_URL}/entity/demand"
-    r_post = requests.post(url, headers=HEADERS, json=demand_payload, timeout=30)
-    if r_post.status_code >= 400:
-        print(f"[MS ERROR] create_demand status={r_post.status_code} body={r_post.text[:500]}")
-    r_post.raise_for_status()
-    return r_post.json()
+    resp = requests.post(url, headers=HEADERS, json=payload)
+    if not resp.ok:
+        raise RuntimeError(
+            f"MS POST {url} failed: {resp.status_code} {resp.text}"
+        )
+    return resp.json()
