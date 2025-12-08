@@ -304,7 +304,7 @@ def write_csv_report(report_rows: List[dict]) -> str:
     fd, path = tempfile.mkstemp(prefix="stock_report_", suffix=".csv")
     os.close(fd)
 
-    with open(path, "w", newline="", encoding="utf-8") as f:
+    with open(path, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.writer(f, delimiter=";")
         writer.writerow(["#", "Название", "Артикул", "Остаток"])
         for idx, row in enumerate(report_rows, start=1):
