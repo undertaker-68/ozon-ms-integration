@@ -202,6 +202,28 @@ def build_ozon_stocks_from_ms() -> Tuple[List[dict], List[dict], int, List[dict]
             if not article_raw:
                 continue
 
+                # Теперь обрабатываем каждую строку и считаем stock_int
+        for row in rows:
+            article_raw = row.get("article")
+            if not article_raw:
+                continue
+
+            # ==== ОТЛАДКА ДЛЯ 00519, 10086, 10264-A93 ====
+            try:
+                import json
+                if str(article_raw) in ("00519", "10086", "10264-A93"):
+                    print(
+                        "\n[MS DEBUG ROW]",
+                        ms_store_id,
+                        "article=",
+                        article_raw,
+                    )
+                    print(json.dumps(row, ensure_ascii=False, indent=2))
+            except Exception as e:
+                print("[MS DEBUG ERROR]", e)
+            # ==== /ОТЛАДКА ====
+
+
             article = normalize_article(article_raw)
             if not article:
                 continue
