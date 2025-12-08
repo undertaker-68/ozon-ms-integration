@@ -26,58 +26,62 @@ DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
 # включение/выключение обновления второго кабинета (по желанию)
 ENABLE_OZON2_STOCKS = os.getenv("ENABLE_OZON2_STOCKS", "true").lower() == "true"
 
-# отдельный склад для второго кабинета
-OZON2_MS_STORE_ID = os.getenv("OZON2_MS_STORE_ID", "").strip() or None
-OZON2_WAREHOUSE_ID = os.getenv("OZON2_WAREHOUSE_ID", "").strip() or None
+# отдельный склад для второго кабинета (только warehouse_id, склад MS тот же)
+OZON2_WAREHOUSE_ID_ENV = os.getenv("OZON2_WAREHOUSE_ID")
+OZON2_WAREHOUSE_ID = int(OZON2_WAREHOUSE_ID_ENV) if OZON2_WAREHOUSE_ID_ENV else None
 
-# игнорируемые артикулы (через запятую)
-IGNORE_STOCK_OFFERS_RAW = os.getenv("IGNORE_STOCK_OFFERS", "") or ""
+IGNORE_OFFERS_ENV = os.getenv("IGNORE_STOCK_OFFERS", "")
 IGNORE_STOCK_OFFERS: Set[str] = {
-    x.strip() for x in IGNORE_STOCK_OFFERS_RAW.split(",") if x.strip()
+    x.strip() for x in IGNORE_OFFERS_ENV.split(",") if x.strip()
 }
 
 
 def _parse_warehouse_map() -> Dict[str, int]:
     """
-    Разбираем OZON_WAREHOUSE_MAP или OZON_WAREHOUSE_ID / MS_OZON_STORE_ID
+    Разбираем OZON_WAREHOUSE_MAP или legacy-переменные
     и получаем словарь {ms_store_id: ozon_warehouse_id}
     """
     warehouse_map: Dict[str, int] = {}
 
-    raw_map = os.getenv("OZON_WAREHOUSE_MAP", "").strip()
-    if raw_map:
-        # Формат: MS_STORE_ID:OZON_WAREHOUSE_ID[,MS_STORE_ID2:OZON_WAREHOUSE_ID2...]
-        pairs = [p.strip() for p in raw_map.split(",") if p.strip()]
-        for p in pairs:
-            try:
-                ms_store_id, wh_id_str = p.split(":", 1)
-            except ValueError:
-                print(f"[WARN] Неверная пара в OZON_WAREHOUSE_MAP: {p!r}")
+    # Новый вариант: OZON_WAREHOUSE_MAP=MS_STORE_ID:OZON_WH_ID[,...]
+    raw = os.getenv("OZON_WAREHOUSE_MAP", "") or ""
+    raw = raw.strip()
+    if raw:
+        for part in raw.split(","):
+            part = part.strip()
+            if not part:
                 continue
-            ms_store_id = ms_store_id.strip()
+            try:
+                ms_id, wh_id_str = part.split(":", 1)
+            except ValueError:
+                print(f"[WARN] Неверная пара в OZON_WAREHOUSE_MAP: {part!r}")
+                continue
+            ms_id = ms_id.strip()
             wh_id_str = wh_id_str.strip()
-            if not ms_store_id or not wh_id_str:
-                print(f"[WARN] Пустой ms_store_id или warehouse_id в паре {p!r}")
+            if not ms_id or not wh_id_str:
+                print(f"[WARN] Пустой ms_store_id или warehouse_id в паре {part!r}")
                 continue
             try:
                 wh_id = int(wh_id_str)
             except ValueError:
-                print(f"[WARN] Неверный Ozon warehouse_id (не int) в паре {p!r}")
+                print(f"[WARN] Неверный склад Ozon (не int) в паре {part!r}")
                 continue
-            warehouse_map[ms_store_id] = wh_id
+            warehouse_map[ms_id] = wh_id
 
-    # Бэкап: старые переменные MS_OZON_STORE_ID / OZON_WAREHOUSE_ID
+    # старый вариант для совместимости
     if not warehouse_map:
-        ms_store_id = os.getenv("MS_OZON_STORE_ID", "").strip()
-        wh_old = os.getenv("OZON_WAREHOUSE_ID", "").strip()
-        if ms_store_id and wh_old:
+        ms_old = os.getenv("MS_OZON_STORE_ID")
+        wh_old = os.getenv("OZON_WAREHOUSE_ID")
+        if ms_old and wh_old:
             try:
-                warehouse_map[ms_store_id] = int(wh_old)
+                warehouse_map[ms_old] = int(wh_old)
             except ValueError:
                 print(f"[WARN] Неверный OZON_WAREHOUSE_ID: {wh_old!r}")
 
     if not warehouse_map:
-        raise RuntimeError("Не задан OZON_WAREHOUSE_MAP / MS_OZON_STORE_ID / OZON_WAREHOUSE_ID в .env")
+        raise RuntimeError(
+            "Не задан OZON_WAREHOUSE_MAP / MS_OZON_STORE_ID / OZON_WAREHOUSE_ID в .env"
+        )
 
     return warehouse_map
 
@@ -96,37 +100,6 @@ def normalize_article(article: str) -> str:
     return str(article).strip()
 
 
-def _ms_calc_available(row: dict) -> int:
-    """
-    Вычисляем передаваемый остаток по формуле:
-      Остаток = stock - reserve
-
-    Поля МойСклад:
-      stock   — «Остаток» по выбранному складу
-      reserve — «Резерв» по выбранному складу
-
-    Поля quantity / inTransit / ожидание НЕ используем.
-    """
-    stock_raw = row.get("stock")
-    reserve_raw = row.get("reserve", 0)
-
-    try:
-        stock_val = int(stock_raw or 0)
-    except Exception:
-        stock_val = 0
-
-    try:
-        reserve_val = int(reserve_raw or 0)
-    except Exception:
-        reserve_val = 0
-
-    available = stock_val - reserve_val
-    if available < 0:
-        available = 0
-
-    return available
-
-
 def _fetch_ms_stock_rows_for_store(store_id: str) -> List[dict]:
     """
     Читаем все строки ассортимента по складу store_id.
@@ -142,24 +115,24 @@ def _fetch_ms_stock_rows_for_store(store_id: str) -> List[dict]:
             break
 
         rows.extend(batch)
-
         if len(batch) < limit:
             break
 
         offset += limit
 
+    print(f"[MS] Получено {len(rows)} строк ассортимента по складу {store_id}")
     return rows
 
 
-def build_ozon_stocks_from_ms() -> Tuple[List[dict], List[dict], int, List[List[str]]]:
+def build_ozon_stocks_from_ms() -> Tuple[List[dict], List[dict], int, List[dict]]:
     """
-    Основная функция построения списка остатков для Ozon из МойСклад.
+    Читаем остатки из МойСклад и фильтруем по статусам товаров в Ozon.
 
     Возвращаем:
-      stocks_ozon1   – список для API /v2/products/stocks (кабинет Auto-MiX)
-      stocks_ozon2   – список для API /v2/products/stocks (кабинет Trail Gear)
+      stocks_ozon1   – список для API /v2/products/stocks (кабинет 1)
+      stocks_ozon2   – список для API /v2/products/stocks (кабинет 2)
       skipped_count  – сколько позиций отфильтровано (архив/нет в Ozon)
-      report_rows    – строки для CSV-отчёта (общий список по обоим кабинетам)
+      report_rows    – строки для CSV-отчёта
     """
     # ---------- Собираем кандидатов из МойСклад ----------
 
@@ -167,11 +140,14 @@ def build_ozon_stocks_from_ms() -> Tuple[List[dict], List[dict], int, List[List[
     names_by_article: Dict[str, str] = {}
 
     for ms_store_id, ozon_wh_id in WAREHOUSE_MAP.items():
-        print(f"[MS] Обработка склада MS store_id={ms_store_id} → Ozon warehouse_id={ozon_wh_id}")
+        print(
+            f"[MS] Обработка склада MS store_id={ms_store_id} → Ozon warehouse_id={ozon_wh_id}"
+        )
 
         rows = _fetch_ms_stock_rows_for_store(ms_store_id)
 
         # Строим карту остатков по href ассортимента для ЭТОГО склада
+        # именно по формуле: Остаток - Резерв (ожидание не используем)
         stock_by_href: Dict[str, int] = {}
         for r in rows:
             href = None
@@ -190,8 +166,25 @@ def build_ozon_stocks_from_ms() -> Tuple[List[dict], List[dict], int, List[List[
             if not href:
                 continue
 
-            # Остаток по формуле: Остаток - Резерв
-            stock_by_href[href] = _ms_calc_available(r)
+            # Остаток компонента по формуле: stock - reserve
+            stock_val = r.get("stock")
+            reserve_val = r.get("reserve", 0)
+
+            try:
+                stock_int = int(stock_val or 0)
+            except Exception:
+                stock_int = 0
+
+            try:
+                reserve_int = int(reserve_val or 0)
+            except Exception:
+                reserve_int = 0
+
+            available = stock_int - reserve_int
+            if available < 0:
+                available = 0
+
+            stock_by_href[href] = available
 
         # Теперь обрабатываем каждую строку и считаем stock_int
         for row in rows:
@@ -222,12 +215,21 @@ def build_ozon_stocks_from_ms() -> Tuple[List[dict], List[dict], int, List[List[
                 try:
                     stock_int = compute_bundle_available(row, stock_by_href)
                 except TypeError:
-                    # Если compute_bundle_available ещё со старой сигнатурой (1 аргумент) –
+                    # Если compute_bundle_available ещё со старой сигнатурой –
                     # не падаем, но такие комплекты считаем недоступными.
                     stock_int = 0
             else:
-                # Для обычных товаров считаем по формуле: Остаток - Резерв
-                stock_int = _ms_calc_available(row)
+                # Для обычных товаров – старая логика:
+                # сначала используем quantity (Доступно),
+                # если его нет – fallback на stock.
+                stock_raw = row.get("quantity")
+                if stock_raw is None:
+                    stock_raw = row.get("stock", 0)
+
+                try:
+                    stock_int = int(stock_raw)
+                except Exception:
+                    stock_int = 0
 
             if stock_int < 0:
                 stock_int = 0
@@ -243,124 +245,151 @@ def build_ozon_stocks_from_ms() -> Tuple[List[dict], List[dict], int, List[List[
 
     # ---------- Получаем статусы товаров из обоих кабинетов Ozon ----------
 
-    offer_ids = sorted({article for article, _, _ in candidates})
+    all_offer_ids = sorted({article for article, _, _ in candidates})
+    print(f"[OZON] Всего артикулов для проверки: {len(all_offer_ids)}")
 
-    print(f"[OZON] Запрашиваем статусы {len(offer_ids)} товаров (кабинет 1)...")
-    states_ozon1_raw = get_products_state_by_offer_ids_ozon1(offer_ids)
-    print(f"[OZON2] Запрашиваем статусы {len(offer_ids)} товаров (кабинет 2)...")
-    states_ozon2_raw = get_products_state_by_offer_ids_ozon2(offer_ids)
+    states_ozon1_raw = get_products_state_by_offer_ids_ozon1(all_offer_ids)
+    states_ozon2_raw = get_products_state_by_offer_ids_ozon2(all_offer_ids)
 
-    # get_products_state_by_offer_ids возвращает словарь offer_id -> объект состояния
-    states_ozon1: Dict[str, dict] = states_ozon1_raw or {}
-    states_ozon2: Dict[str, dict] = states_ozon2_raw or {}
+    # ожидаем словарь offer_id -> state или None
+    state_by_offer_ozon1: Dict[str, str | None] = {
+        normalize_article(oid): state
+        for oid, state in (states_ozon1_raw or {}).items()
+    }
+    state_by_offer_ozon2: Dict[str, str | None] = {
+        normalize_article(oid): state
+        for oid, state in (states_ozon2_raw or {}).items()
+    }
 
-    # ---------- Формируем итоговые списки остатков для Ozon ----------
+    # ---------- Фильтруем кандидатов по статусам в кабинетах ----------
 
     stocks_ozon1: List[dict] = []
     stocks_ozon2: List[dict] = []
     skipped_count = 0
-    report_rows: List[List[str]] = []
+    report_rows: List[dict] = []
 
-    for article, stock_int, ozon_wh_id in candidates:
-        state1 = states_ozon1.get(article)
-        state2 = states_ozon2.get(article)
+    for article, stock, ozon_wh_id in candidates:
+        st1_state = state_by_offer_ozon1.get(article)
+        st2_state = state_by_offer_ozon2.get(article)
 
-        # если товар не найден ни в одном кабинете – пропускаем
-        if not state1 and not state2:
+        # Если нет ни в одном кабинете – пропускаем
+        if st1_state is None and st2_state is None:
+            skipped_count += 1
+            continue
+
+        # В Ozon1 отправляем только те, что либо активны, либо есть в кабинете
+        send_to_ozon1 = st1_state is not None and st1_state != "ARCHIVED"
+
+        # Во второй кабинет аналогично, плюс учитываем переключатель ENABLE_OZON2_STOCKS
+        send_to_ozon2 = (
+            ENABLE_OZON2_STOCKS
+            and st2_state is not None
+            and st2_state != "ARCHIVED"
+        )
+
+        if not send_to_ozon1 and not send_to_ozon2:
             skipped_count += 1
             continue
 
         name = names_by_article.get(article, "")
 
-        # кабинет 1
-        if state1:
+        if send_to_ozon1:
             stocks_ozon1.append(
                 {
                     "offer_id": article,
-                    "stock": stock_int,
+                    "stock": stock,
                     "warehouse_id": ozon_wh_id,
                 }
             )
 
-        # кабинет 2 (по желанию)
-        if ENABLE_OZON2_STOCKS and state2:
-            wh2_id = None
-            if OZON2_MS_STORE_ID and OZON2_WAREHOUSE_ID and ms_store_id == OZON2_MS_STORE_ID:
-                try:
-                    wh2_id = int(OZON2_WAREHOUSE_ID)
-                except ValueError:
-                    wh2_id = None
-
-            # если отдельный склад под второй кабинет не настроен – используем тот же склад
-            if not wh2_id:
-                wh2_id = ozon_wh_id
-
+        if send_to_ozon2 and OZON2_WAREHOUSE_ID:
             stocks_ozon2.append(
                 {
                     "offer_id": article,
-                    "stock": stock_int,
-                    "warehouse_id": wh2_id,
+                    "stock": stock,
+                    "warehouse_id": OZON2_WAREHOUSE_ID,
                 }
             )
 
         report_rows.append(
-            [
-                article,
-                name,
-                str(stock_int),
-                str(ozon_wh_id),
-                "1" if state1 else "0",
-                "1" if state2 else "0",
-            ]
+            {
+                "name": name,
+                "article": article,
+                "stock": stock,
+            }
         )
+
+    print(
+        f"[STOCK] После фильтрации: "
+        f"к отправке в Ozon1: {len(stocks_ozon1)}, "
+        f"к отправке в Ozon2: {len(stocks_ozon2)}, "
+        f"отфильтровано: {skipped_count}"
+    )
 
     return stocks_ozon1, stocks_ozon2, skipped_count, report_rows
 
 
-def main(dry_run: bool | None = None):
+def write_csv_report(report_rows: List[dict]) -> str:
     """
-    Точка входа для обновления остатков.
+    Пишем CSV во временный файл, возвращаем путь.
     """
-    if dry_run is None:
-        dry_run = DRY_RUN
+    fd, path = tempfile.mkstemp(prefix="stock_report_", suffix=".csv")
+    os.close(fd)
 
-    print(f"[STOCK] Запуск обновления остатков. DRY_RUN={dry_run}")
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f, delimiter=";")
+        writer.writerow(["#", "Название", "Артикул", "Остаток"])
+        for idx, row in enumerate(report_rows, start=1):
+            writer.writerow(
+                [
+                    idx,
+                    row.get("name", ""),
+                    row.get("article", ""),
+                    row.get("stock", 0),
+                ]
+            )
 
-    stocks_ozon1, stocks_ozon2, skipped_count, report_rows = build_ozon_stocks_from_ms()
+    return path
 
-    print(f"[STOCK] Кандидатов для обновления: {len(report_rows)}, пропущено (нет в Ozon): {skipped_count}")
-    print(f"[STOCK] Для кабинета 1: {len(stocks_ozon1)} позиций.")
-    print(f"[STOCK] Для кабинета 2: {len(stocks_ozon2)} позиций.")
 
-    # Формируем временный CSV-отчёт
-    if report_rows:
-        fd, tmp_path = tempfile.mkstemp(prefix="stock_report_", suffix=".csv")
-        os.close(fd)
-        with open(tmp_path, "w", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f, delimiter=";")
-            writer.writerow(["Артикул", "Название", "Остаток (stock-reserve)", "Склад Ozon", "В Ozon1", "В Ozon2"])
-            writer.writerows(report_rows)
+def main():
+    print("[STOCK] Запуск обновления остатков...")
 
-        try:
-            send_telegram_document(tmp_path, caption="[STOCK] Отчёт по остаткам")
-        except Exception as e:
-            print(f"[WARN] Не удалось отправить отчёт в Telegram: {e!r}")
-        finally:
-            try:
-                os.remove(tmp_path)
-            except Exception:
-                pass
+    stocks_ozon1, stocks_ozon2, skipped_count, report_rows = (
+        build_ozon_stocks_from_ms()
+    )
 
-    if dry_run:
-        print("[STOCK] DRY_RUN=TRUE, остатки в Ozon НЕ обновляем.")
+    # ---------- Отчёт в Telegram ----------
+
+    try:
+        csv_path = write_csv_report(report_rows)
+        send_telegram_document(
+            csv_path, caption="Отчёт по остаткам (МойСклад → Ozon)"
+        )
+        os.remove(csv_path)
+    except Exception as e:
+        print(
+            f"[STOCK] Не удалось отправить CSV-отчёт в Telegram: {e!r}"
+        )
+
+    if DRY_RUN:
+        print(
+            "[STOCK] DRY_RUN=true — обновление остатков в Ozon не выполняется."
+        )
         return
 
-    # Обновляем остатки в первом кабинете
+    # ---------- Обновление остатков в первом кабинете ----------
+
     if stocks_ozon1:
         try:
+            print(
+                f"[OZON1] Обновление остатков, позиций: {len(stocks_ozon1)}"
+            )
             update_stocks_ozon1(stocks_ozon1)
         except Exception as e:
-            msg = f"[STOCK] Ошибка обновления остатков в первом кабинете Ozon: {e!r}"
+            msg = (
+                f"[STOCK] Ошибка обновления остатков в первом кабинете Ozon: {e!r}"
+            )
             print(msg)
             try:
                 send_telegram_message(msg)
@@ -369,12 +398,18 @@ def main(dry_run: bool | None = None):
     else:
         print("[OZON1] Нет позиций для обновления остатков.")
 
-    # Обновляем остатки во втором кабинете (если включен)
+    # ---------- Обновление остатков во втором кабинете ----------
+
     if ENABLE_OZON2_STOCKS and stocks_ozon2:
         try:
+            print(
+                f"[OZON2] Обновление остатков, позиций: {len(stocks_ozon2)}"
+            )
             update_stocks_ozon2(stocks_ozon2)
         except Exception as e:
-            msg = f"[STOCK] Ошибка обновления остатков во втором кабинете Ozon: {e!r}"
+            msg = (
+                f"[STOCK] Ошибка обновления остатков во втором кабинете Ozon: {e!r}"
+            )
             print(msg)
             try:
                 send_telegram_message(msg)
