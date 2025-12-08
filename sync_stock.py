@@ -92,6 +92,40 @@ def normalize_article(article: str) -> str:
         return ""
     return str(article).strip()
 
+def _ms_calc_available(row: dict) -> int:
+    """
+    Вычисляем передаваемый остаток по формуле:
+      Остаток = stock - reserve
+
+    Поля МойСклад:
+      stock   — "Остаток"
+      reserve — "Резерв"
+
+    quantity / available / inTransit / ожидание — НЕ используем.
+    """
+    stock_raw = row.get("stock")  # Остаток
+    reserve_raw = row.get("reserve", 0)  # Резерв
+
+    # если по какой-то причине stock отсутствует, подстрахуемся quantity
+    if stock_raw is None:
+        stock_raw = row.get("quantity", 0)
+
+    try:
+        stock = int(stock_raw)
+    except Exception:
+        stock = 0
+
+    try:
+        reserve = int(reserve_raw)
+    except Exception:
+        reserve = 0
+
+    available = stock - reserve
+    if available < 0:
+        available = 0
+
+    return available
+
 
 def _fetch_ms_stock_rows_for_store(store_id: str) -> List[dict]:
     """
@@ -156,14 +190,7 @@ def build_ozon_stocks_from_ms() -> Tuple[List[dict], List[dict], int, List[dict]
             if not href:
                 continue
 
-            stock_raw = r.get("quantity")
-            if stock_raw is None:
-                stock_raw = r.get("stock", 0)
-
-            try:
-                stock_by_href[href] = int(stock_raw)
-            except Exception:
-                stock_by_href[href] = 0
+            stock_by_href[href] = _ms_calc_available(r)
 
         # Теперь обрабатываем каждую строку и считаем stock_int
         for row in rows:
