@@ -172,24 +172,111 @@ def calc_bundle_available_for_components(
     return max(min(amounts), 0)
 
 
+def _extract_components(obj: dict) -> list[dict]:
+    """
+    Достаём массив components из разных вариантов структуры:
+      - "components": [ ... ]
+      - "components": {"rows": [ ... ]}
+    """
+    if not isinstance(obj, dict):
+        return []
+
+    comps = obj.get("components")
+    if isinstance(comps, list):
+        return comps
+    if isinstance(comps, dict):
+        rows = comps.get("rows")
+        if isinstance(rows, list):
+            return rows
+    return []
+
+
 def compute_bundle_available(bundle_row: dict, stock_by_href: dict[str, int]) -> int:
     """
-    Высокоуровневый помощник:
-    на вход – строка ассортимента комплекта + словарь остатков по href,
-    на выход – доступный остаток комплекта по компоненту с наименьшим количеством.
+    Рассчитывает количество доступных комплектов по формуле:
+      Остаток комплекта = min(остаток_компонента_i / требуемое_кол-во_i)
+
+    Для каждого компонента в stock_by_href уже лежит Остаток - Резерв
+    по нужному складу, «Ожидание»/quantity не используется.
     """
-    meta = bundle_row.get("meta") or bundle_row.get("assortment", {}).get("meta") or {}
-    href = meta.get("href")
-    if not href:
+    # 1) Пытаемся взять components прямо из строки ассортимента
+    components = _extract_components(bundle_row)
+
+    # 2) Если пусто – пробуем взять из expand=assortment
+    if not components:
+        assort = bundle_row.get("assortment")
+        if isinstance(assort, dict):
+            components = _extract_components(assort)
+
+    # 3) Если всё ещё пусто – грузим сам комплект по href
+    if not components:
+        href = None
+        assort = bundle_row.get("assortment")
+        if isinstance(assort, dict):
+            meta = assort.get("meta") or {}
+            href = meta.get("href")
+
+        if not href:
+            meta = bundle_row.get("meta") or {}
+            href = meta.get("href")
+
+        if href:
+            bundle_data = _ms_get_by_href(href)
+            components = _extract_components(bundle_data)
+
+    if not components:
+        # Нет состава – считаем, что остаток комплекта 0
         return 0
 
-    components = get_product_bundle_components(href)
-    return calc_bundle_available_for_components(components, stock_by_href)
+    amounts: list[int] = []
 
+    for comp in components:
+        qty_required = 1
+        href: str | None = None
 
-# ==========================
-# ОСТАТКИ
-# ==========================
+        # Вариант 1: компонент – словарь
+        if isinstance(comp, dict):
+            qty_required = comp.get("quantity", 1) or 1
+
+            assort = comp.get("assortment")
+            if isinstance(assort, dict):
+                meta = assort.get("meta", assort) or {}
+                if isinstance(meta, dict):
+                    href = meta.get("href")
+            elif isinstance(assort, str):
+                # Иногда assortment может быть сразу href строкой
+                href = assort
+
+        # Вариант 2: компонент – просто href строкой
+        elif isinstance(comp, str):
+            href = comp
+            qty_required = 1
+
+        # Если так и не получили href – пропускаем компонент
+        if not href:
+            continue
+
+        # Берём остаток по этому href из заранее собранного словаря
+        available = stock_by_href.get(href, 0)
+
+        try:
+            available = int(available)
+        except Exception:
+            available = 0
+
+        if qty_required <= 0:
+            qty_required = 1
+
+        # Сколько комплектов можно собрать из этого компонента
+        amounts.append(max(0, available) // qty_required)
+
+    if not amounts:
+        return 0
+
+    result = min(amounts)
+    if result < 0:
+        result = 0
+    return result
 
 def get_stock_by_assortment_href(assortment_href: str) -> dict | None:
     """
