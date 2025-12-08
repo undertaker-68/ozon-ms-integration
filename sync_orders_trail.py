@@ -296,13 +296,14 @@ def process_posting(posting: dict, dry_run: bool) -> None:
             update_customer_order_state(existing["meta"]["href"], state_meta_href)
         return
 
-    # Создаём новый заказ
+        # Создаём новый заказ
     created = create_customer_order(payload)
 
     # Если заказ уже в стадии доставки/доставлен — можно сразу сделать отгрузку
     if status in ("delivering", "delivered"):
         try:
-            create_demand_from_order(created["meta"]["href"])
+            # БЫЛО: create_demand_from_order(created["meta"]["href"])
+            create_demand_from_order(created)
         except Exception as e:
             msg = (
                 f"[ORDERS TG] Ошибка создания отгрузки для заказа {order_name}: {e!r}"
@@ -312,7 +313,6 @@ def process_posting(posting: dict, dry_run: bool) -> None:
                 send_telegram_message(msg)
             except Exception:
                 pass
-
 
 def sync_fbs_orders(dry_run: bool, limit: int = 300):
     print(f"[ORDERS TG] Старт sync_fbs_orders (Trail Gear), DRY_RUN_ORDERS={dry_run}")
