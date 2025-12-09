@@ -22,61 +22,85 @@ except ImportError:
         print("Telegram notifier не доступен:", text)
         return False
 
-    def send_telegram_document(file_path: str, caption: str = "") -> bool:
-        print(f"Telegram notifier не доступен для отправки файла: {file_path} ({caption})")
+    def send_telegram_document(path: str, caption: str | None = None) -> bool:
+        print(f"Telegram document не доступен: {path} {caption}")
         return False
 
-try:
-    from ozon_client2 import get_fbs_postings as get_fbs_postings_ozon2
-except ImportError:
-    get_fbs_postings_ozon2 = None
 
 load_dotenv()
 
+# -----------------------------
+# Каналы продаж МойСклад для заказов
+# -----------------------------
+
+SALES_CHANNEL_AUTOMIX_META = {
+    "href": "https://api.moysklad.ru/api/remap/1.2/entity/saleschannel/fede2826-9fd0-11ee-0a80-0641000f3d25",
+    "type": "saleschannel",
+    "mediaType": "application/json",
+}
+
+SALES_CHANNEL_TRAIL_META = {
+    "href": "https://api.moysklad.ru/api/remap/1.2/entity/saleschannel/ff2827b8-9fd0-11ee-0a80-0641000f3d31",
+    "type": "saleschannel",
+    "mediaType": "application/json",
+}
+
 DRY_RUN_ORDERS = os.getenv("DRY_RUN_ORDERS", "true").lower() == "true"
 
-MS_STATE_AWAIT_PACK = os.getenv("MS_STATE_AWAIT_PACK")
-MS_STATE_AWAIT_SHIP = os.getenv("MS_STATE_AWAIT_SHIP")
-MS_STATE_DELIVERING = os.getenv("MS_STATE_DELIVERING")
-MS_STATE_DELIVERED = os.getenv("MS_STATE_DELIVERED")
-MS_STATE_CANCELLED = os.getenv("MS_STATE_CANCELLED")
-
+MS_BASE_URL = os.getenv("MS_BASE_URL", "https://api.moysklad.ru/api/remap/1.2")
 MS_ORGANIZATION_HREF = os.getenv("MS_ORGANIZATION_HREF")
-MS_AGENT_HREF = os.getenv("MS_AGENT_HREF")
 MS_STORE_HREF = os.getenv("MS_STORE_HREF")
+MS_AGENT_HREF = os.getenv("MS_AGENT_HREF")
 
-if not (MS_ORGANIZATION_HREF and MS_AGENT_HREF and MS_STORE_HREF):
-    raise RuntimeError(
-        "Не заданы MS_ORGANIZATION_HREF / MS_AGENT_HREF / MS_STORE_HREF. "
-        "Скопируйте meta.href из МойСклад."
-    )
+MS_STATE_NEW_HREF = os.getenv("MS_STATE_NEW_HREF")  # состояние "Новый"
+MS_STATE_IN_PROGRESS_HREF = os.getenv("MS_STATE_IN_PROGRESS_HREF")
+MS_STATE_DONE_HREF = os.getenv("MS_STATE_DONE_HREF")
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+OZON2_ENABLED = os.getenv("ENABLE_OZON2_ORDERS", "true").lower() == "true"
 
-ERRORS_AUTO_FILE_PATH = os.path.join(
-    BASE_DIR,
-    "orders_errors_auto.csv",
-)
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-ERRORS_TRAIL_FILE_PATH = os.path.join(
-    BASE_DIR,
-    "orders_errors_trail.csv",
-)
+ERRORS_AUTO_FILE_PATH = "ozon_orders_errors_auto.csv"
+ERRORS_TRAIL_FILE_PATH = "ozon_orders_errors_trail.csv"
+
+if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
+    bot = Bot(token=TELEGRAM_TOKEN)
+else:
+    bot = None
 
 
-def _human_error_from_exception(e: Exception) -> str:
+def _append_order_errors_to_file(path: str, rows: list[list[str]]) -> None:
+    """
+    Дописывает строки с ошибками в CSV-файл (UTF-8 с BOM).
+    """
+    if not rows:
+        return
+
+    file_exists = os.path.exists(path)
+
+    with open(path, "a", newline="", encoding="utf-8-sig") as f:
+        writer = csv.writer(f, delimiter=";")
+        if not file_exists:
+            writer.writerow(
+                ["Дата/время", "Ozon аккаунт", "Номер отправления", "Ошибка"]
+            )
+        for row in rows:
+            writer.writerow(row)
+
+
+def _format_ms_error(e: Exception) -> str:
+    """
+    Приводим ошибки МойСклад к человеку-понятному виду.
+    """
     if isinstance(e, requests.HTTPError):
-        resp = e.response
-        status = resp.status_code if resp is not None else None
-        data = None
+        r = e.response
+        try:
+            data = r.json()
+        except Exception:
+            return f"HTTP {r.status_code}: {r.text[:500]}"
 
-        if resp is not None:
-            try:
-                data = resp.json()
-            except Exception:
-                data = None
-
-        if status == 412 and isinstance(data, dict):
+        if r.status_code == 412:
             errors = data.get("errors") or []
             if errors:
                 err_msg = errors[0].get("error") or errors[0].get("message") or ""
@@ -94,77 +118,34 @@ def _human_error_from_exception(e: Exception) -> str:
                 if msg:
                     parts.append(msg)
             if parts:
-                return f"HTTP {status or ''}: " + "; ".join(parts)
+                return f"МойСклад: {', '.join(parts)}"
 
-        if resp is not None:
-            return f"HTTP {status}: {resp.text[:500]}"
+        return f"HTTP {r.status_code}: {r.text[:500]}"
 
     return repr(e)
 
 
-def _build_error_rows_for_posting(posting: dict, reason: str) -> list[dict]:
-    posting_number = posting.get("posting_number", "")
-    products = posting.get("products") or []
-
-    rows: list[dict] = []
-
-    if products:
-        for p in products:
-            rows.append(
-                {
-                    "posting_number": posting_number,
-                    "article": p.get("offer_id") or "",
-                    "name": p.get("name") or "",
-                    "reason": reason,
-                }
-            )
-    else:
-        rows.append(
-            {
-                "posting_number": posting_number,
-                "article": "",
-                "name": "",
-                "reason": reason,
-            }
-        )
-
-    return rows
+def _send_telegram_error(ozon_account: str, posting_number: str, text: str) -> None:
+    """
+    Уведомление в Telegram + запись в CSV.
+    """
+    msg = f"[ORDERS] Ошибка по отправлению {posting_number} ({ozon_account}): {text}"
+    print(msg)
+    try:
+        send_telegram_message(msg)
+    except Exception:
+        pass
 
 
-def build_ms_positions_from_posting(posting: dict) -> list[dict]:
-    products = posting.get("products") or []
-    ms_positions = []
-    missing = []
-
-    for p in products:
-        offer_id = p.get("offer_id")
-        qty = p.get("quantity", 0)
-        if not offer_id or qty <= 0:
-            continue
-
-        ms_product = find_product_by_article(offer_id)
-        if not ms_product:
-            missing.append(offer_id)
-            continue
-
-        ms_positions.append(
-            {
-                "quantity": qty,
-                "ms_meta": ms_product["meta"],
-                "article": offer_id,
-            }
-        )
-
-    if missing:
-        text = (
-            "❗ Не найдены товары в МойСклад по артикулу из Ozon\n"
-            f"Отправление: {posting.get('posting_number')}\n"
-            f"Артикулы: {', '.join(missing)}"
-        )
-        print("[ORDERS]", text.replace("\n", " | "))
-        return []
-
-    return ms_positions
+def _ms_get_state_meta_href(status: str) -> str | None:
+    """
+    Возвращает meta.href состояния заказа МойСклад по статусу отправления Ozon.
+    """
+    if status in ("awaiting_packaging", "awaiting_deliver"):
+        return MS_STATE_NEW_HREF or MS_STATE_IN_PROGRESS_HREF
+    if status == "delivered":
+        return MS_STATE_DONE_HREF
+    return None
 
 
 def process_posting(posting: dict, dry_run: bool) -> None:
@@ -185,18 +166,38 @@ def process_posting(posting: dict, dry_run: bool) -> None:
 
     # Карта статусов
     status_map = {
-        "awaiting_packaging": MS_STATE_AWAIT_PACK,
-        "awaiting_deliver": MS_STATE_AWAIT_SHIP,
-        "delivering": MS_STATE_DELIVERING,
-        "delivered": MS_STATE_DELIVERED,
-        "cancelled": MS_STATE_CANCELLED,
+        "awaiting_packaging": "ожидает сборки",
+        "awaiting_deliver": "ожидает передачи в доставку",
+        "delivering": "в доставке",
+        "delivered": "доставлен",
+        "cancelled": "отменён",
     }
-    state_meta_href = status_map.get(status)
+    status_human = status_map.get(status, status)
 
-    # Позиции МойСклад
-    ms_positions = build_ms_positions_from_posting(posting)
+    # Готовим позиции для заказа в МойСклад
+    items = posting.get("products") or []
+    ms_positions: list[dict] = []
+
+    for item in items:
+        offer_id = item.get("offer_id")
+        quantity = item.get("quantity") or 0
+
+        if not offer_id or quantity <= 0:
+            continue
+
+        product = find_product_by_article(offer_id)
+        if not product:
+            raise ValueError(f"Товар с артикулом {offer_id!r} не найден в МойСклад")
+
+        ms_positions.append(
+            {
+                "ms_meta": product["meta"],
+                "quantity": quantity,
+            }
+        )
+
     if not ms_positions:
-        raise RuntimeError("Не удалось сопоставить ни одной позиции с товарами МойСклад")
+        raise ValueError("Не удалось добавить ни одной позиции с товарами МойСклад")
 
     positions_payload = [
         {
@@ -222,11 +223,13 @@ def process_posting(posting: dict, dry_run: bool) -> None:
         "mediaType": "application/json",
     }
 
-    # Комментарий в заказе
+    # Комментарий и канал продаж в заказе
     if ozon_account in ("ozon2", "trail_gear"):
         description = "FBS → Trail Gear"
+        sales_channel_meta = SALES_CHANNEL_TRAIL_META
     else:
         description = "FBS → Auto-MiX"
+        sales_channel_meta = SALES_CHANNEL_AUTOMIX_META
 
     payload = {
         "name": order_name,
@@ -235,8 +238,10 @@ def process_posting(posting: dict, dry_run: bool) -> None:
         "store": {"meta": store_meta},
         "positions": positions_payload,
         "description": description,
+        "salesChannel": {"meta": sales_channel_meta},
     }
 
+    state_meta_href = _ms_get_state_meta_href(status)
     if state_meta_href:
         payload["state"] = {
             "meta": {
@@ -255,173 +260,131 @@ def process_posting(posting: dict, dry_run: bool) -> None:
     if dry_run:
         return
 
-    # Проверяем, есть ли уже заказ
-    existing_order = find_customer_order_by_name(order_name)
+    # Проверяем, есть ли уже такой заказ
+    existing = find_customer_order_by_name(order_name)
+    if existing:
+        print(f"[ORDERS] Заказ {order_name} уже существует в МойСклад.")
+        if state_meta_href:
+            update_customer_order_state(existing["meta"]["href"], state_meta_href)
 
-    try:
-        if existing_order:
-            order_id = existing_order["id"]
-            print(f"[ORDERS] Заказ {order_name} уже существует в МойСклад.")
-
-            # Обновляем состояние
-            if state_meta_href:
-                update_customer_order_state(order_id, state_meta_href)
-
-            # При delivering/delivered создаём отгрузку
-            if status in ("delivering", "delivered"):
+        # При delivering/delivered создаём отгрузку и для существующего заказа
+        if status in ("delivering", "delivered"):
+            try:
+                # БЫЛО: create_demand_from_order(existing["meta"]["href"])
+                create_demand_from_order(existing)
+            except Exception as e:
+                msg = (
+                    f"[ORDERS] Ошибка создания отгрузки для существующего заказа "
+                    f"{order_name}: {e!r}"
+                )
+                print(msg)
                 try:
-                    result = create_demand_from_order(existing_order)
-                    if result:
-                        print(
-                            f"[ORDERS] Отгрузка для заказа {order_name} успешно создана "
-                            f"(ID отгрузки: {result.get('id')})"
-                        )
-                except Exception as e:
-                    print(
-                        f"[ORDERS] Ошибка создания отгрузки для существующего "
-                        f"заказа {order_name}: {e!r}"
-                    )
-                    raise
+                    send_telegram_message(msg)
+                except Exception:
+                    pass
+                raise
+        return
 
-        else:
-            # Создаём новый заказ
-            created = create_customer_order(payload)
-            order_id = created["id"]
-            print(f"[ORDERS] Создан новый заказ в МойСклад: {order_name} (ID={order_id})")
+        # Создаём новый заказ
+    created = create_customer_order(payload)
 
-            # При delivering/delivered сразу создаём отгрузку
-            if status in ("delivering", "delivered"):
-                try:
-                    result = create_demand_from_order(created)
-                    if result:
-                        print(
-                            f"[ORDERS] Отгрузка для нового заказа {order_name} успешно создана "
-                            f"(ID отгрузки: {result.get('id')})"
-                        )
-                except Exception as e:
-                    print(
-                        f"[ORDERS] Ошибка создания отгрузки для нового заказа "
-                        f"{order_name}: {e!r}"
-                    )
-                    raise
-
-    except Exception as e:
-        raise e
-
-
-async def send_report_to_telegram(file_path):
-    """Функция для отправки файла в Telegram асинхронно."""
-    bot = Bot(token=os.getenv('TG_BOT_TOKEN'))
-    chat_id = os.getenv('TG_CHAT_ID')
-    with open(file_path, "rb") as f:
-        await bot.send_document(chat_id=chat_id, document=f)
-
-
-def sync_fbs_orders(dry_run: bool, limit: int = 300):
-    print(f"[ORDERS] Старт sync_fbs_orders, DRY_RUN_ORDERS={dry_run}")
-
-    # Уведомление о запуске из cron (или любого другого запуска)
-    try:
-        send_telegram_message(
-            f"🔁 CRON: запуск sync_fbs_orders (заказы), DRY_RUN_ORDERS={dry_run}"
-        )
-    except Exception as e:
-        print("[ORDERS] Не удалось отправить телеграм-уведомление о запуске:", e)
-
-    postings: list[dict] = []
-
-    # --- Кабинет Ozon №1 (как раньше) ---
-    data1 = get_fbs_postings_ozon1(limit=limit)
-    p1 = data1.get("result", {}).get("postings", []) or []
-    for p in p1:
-        # помечаем источник, если вдруг потом пригодится
-        p.setdefault("_ozon_account", "ozon1")
-    postings.extend(p1)
-
-    # --- Кабинет Ozon №2 (если настроен и импорт прошёл) ---
-    if get_fbs_postings_ozon2 is not None:
+    # Если заказ уже в доставке/доставлен — сразу делаем отгрузку
+    if status in ("delivering", "delivered"):
         try:
-            data2 = get_fbs_postings_ozon2(limit=limit)
-            p2 = data2.get("result", {}).get("postings", []) or []
-            for p in p2:
-                p.setdefault("_ozon_account", "ozon2")
-            postings.extend(p2)
+            # БЫЛО: create_demand_from_order(created["meta"]["href"])
+            create_demand_from_order(created)
         except Exception as e:
-            msg = f"❗ Ошибка при получении отправлений из второго кабинета Ozon: {e!r}"
-            print("[ORDERS]", msg)
+            msg = f"[ORDERS] Ошибка создания отгрузки для заказа {order_name}: {e!r}"
+            print(msg)
             try:
                 send_telegram_message(msg)
             except Exception:
                 pass
+            raise
 
-    print(f"[ORDERS] Найдено отправлений: {len(postings)}")
+async def _sync_for_account(
+    ozon_account: str,
+    dry_run: bool,
+    limit: int,
+) -> list[list[str]]:
+    """
+    Синхронизация заказов по одному аккаунту Ozon.
+    Возвращает список строк-ошибок для CSV.
+    """
+    errors: list[list[str]] = []
 
-    # Обрабатываем только заказы, созданные 03.12.2025 и позже
-    cutoff_date = datetime(2025, 12, 3)
+    if ozon_account == "ozon1":
+        from ozon_client import get_fbs_postings as get_postings
+    else:
+        from ozon_client2 import get_fbs_postings as get_postings
 
-    errors_auto: list[dict] = []
-    errors_trail: list[dict] = []
+    try:
+        data = get_postings(limit=limit)
+    except Exception as e:
+        err_text = f"Не удалось получить FBS-отправления: {e!r}"
+        print(f"[ORDERS] {err_text}")
+        try:
+            send_telegram_message(f"[ORDERS] {err_text}")
+        except Exception:
+            pass
+        return errors
+
+    postings = (data or {}).get("result", {}).get("postings") or []
+
+    print(
+        f"[ORDERS] Аккаунт={ozon_account}, получено отправлений: {len(postings)}, "
+        f"DRY_RUN={dry_run}"
+    )
 
     for posting in postings:
-        created_date_str = posting.get("created_at") or posting.get("created") or posting.get("in_process_at")
-        created_date = None
-
-        if created_date_str:
-            try:
-                created_date = datetime.strptime(created_date_str[:10], "%Y-%m-%d")
-            except Exception:
-                created_date = None
-
-        if created_date and created_date < cutoff_date:
-            print(
-                f"[ORDERS] Пропуск отправления {posting.get('posting_number')} "
-                f"(дата создания {created_date.date()} < {cutoff_date.date()})"
-            )
-            continue
-
-        ozon_account = posting.get("_ozon_account") or "ozon1"
-        posting_number = posting.get("posting_number")
+        posting["_ozon_account"] = ozon_account
+        posting_number = posting.get("posting_number") or "UNKNOWN"
 
         try:
             process_posting(posting, dry_run=dry_run)
         except Exception as e:
-            reason = _human_error_from_exception(e)
-            if ozon_account in ("ozon2", "trail_gear"):
-                errors_trail.extend(_build_error_rows_for_posting(posting, reason))
-            else:
-                errors_auto.extend(_build_error_rows_for_posting(posting, reason))
+            err_text = _format_ms_error(e)
+            errors.append(
+                [
+                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    ozon_account,
+                    posting_number,
+                    err_text,
+                ]
+            )
+            _send_telegram_error(ozon_account, posting_number, err_text)
 
-    # Записываем CSV и отправляем в telegram
-    for path, rows, label in [
-        (ERRORS_AUTO_FILE_PATH, errors_auto, "Auto-MiX"),
-        (ERRORS_TRAIL_FILE_PATH, errors_trail, "Trail Gear"),
-    ]:
-        if not rows:
-            continue
+    return errors
 
-        file_exists = os.path.exists(path)
-        with open(path, "a", newline="", encoding="utf-8-sig") as f:
-            writer = csv.writer(f, delimiter=";")
-            if not file_exists:
-                writer.writerow(
-                    ["posting_number", "article", "name", "reason"]
-                )
-            for r in rows:
-                writer.writerow(
-                    [
-                        r.get("posting_number", ""),
-                        r.get("article", ""),
-                        r.get("name", ""),
-                        r.get("reason", ""),
-                    ]
-                )
 
-        try:
-            caption = f"Ошибки по заказам ({label})"
-            send_telegram_document(path, caption=caption)
-        except Exception as e:
-            print(f"[ORDERS] Не удалось отправить CSV с ошибками в Telegram ({label}): {e!r}")
+def sync_fbs_orders(dry_run: bool = True, limit: int = 100) -> None:
+    """
+    Основная функция синхронизации FBS-отправлений из Ozon в МойСклад.
+    Работает сразу по двум аккаунтам (если включен второй).
+    """
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    tasks = [
+        _sync_for_account("ozon1", dry_run=dry_run, limit=limit),
+    ]
+
+    if OZON2_ENABLED:
+        tasks.append(_sync_for_account("ozon2", dry_run=dry_run, limit=limit))
+
+    errors_auto, errors_trail = loop.run_until_complete(asyncio.gather(*tasks))
+    loop.close()
+
+    # После обработки заказов — пишем CSV и отправляем ДВА файла с ошибками
+    _append_order_errors_to_file(ERRORS_AUTO_FILE_PATH, errors_auto)
+    _append_order_errors_to_file(ERRORS_TRAIL_FILE_PATH, errors_trail)
+
+    if errors_auto:
+        send_telegram_document(ERRORS_AUTO_FILE_PATH, caption="Ошибки Auto-MiX")
+    if errors_trail:
+        send_telegram_document(ERRORS_TRAIL_FILE_PATH, caption="Ошибки Trail Gear")
 
 
 if __name__ == "__main__":
-    sync_fbs_orders(dry_run=DRY_RUN_ORDERS, limit=50)
+    print("Запуск синхронизации заказов Ozon с МойСклад...")
+    sync_fbs_orders(dry_run=DRY_RUN_ORDERS, limit=300)
