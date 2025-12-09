@@ -127,14 +127,12 @@ def _format_ms_error(e: Exception) -> str:
 
 def _send_telegram_error(ozon_account: str, posting_number: str, text: str) -> None:
     """
-    Уведомление в Telegram + запись в CSV.
+    Ошибка по отправлению — только лог в консоль, без Телеграма.
+    CSV уже формируется выше по коду.
     """
     msg = f"[ORDERS] Ошибка по отправлению {posting_number} ({ozon_account}): {text}"
     print(msg)
-    try:
-        send_telegram_message(msg)
-    except Exception:
-        pass
+    # Телеграм здесь специально отключен, чтобы не спамить чат
 
 
 def _ms_get_state_meta_href(status: str) -> str | None:
