@@ -247,7 +247,7 @@ def process_posting(posting: dict, dry_run: bool) -> None:
     if dry_run:
         return
 
-    # --- ДАЛЬШЕ ЛОГИКА БЕЗ ЗАПУТЫВАНИЯ С existing ---
+    # --- дальше логика без путаницы с existing ---
 
     existing = find_customer_order_by_name(order_name)
 
@@ -255,7 +255,19 @@ def process_posting(posting: dict, dry_run: bool) -> None:
     if existing:
         print(f"[ORDERS] Заказ {order_name} уже существует в МойСклад.")
         if state_meta_href:
-            update_cu_
+            update_customer_order_state(existing["meta"]["href"], state_meta_href)
+
+        # Для delivering/delivered делаем отгрузку
+        if status in ("delivering", "delivered"):
+            create_demand_from_order(existing)
+        return
+
+    # Если заказа ещё нет — создаём
+    created = create_customer_order(payload)
+
+    # И сразу делаем отгрузку, если статус уже delivering/delivered
+    if status in ("delivering", "delivered"):
+        create_demand_from_order(created)
 
 async def _sync_for_account(
     ozon_account: str,
