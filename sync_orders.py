@@ -273,22 +273,14 @@ def process_posting(posting: dict, dry_run: bool) -> None:
             
         return
 
-        # Создаём новый заказ
+           # Создаём новый заказ
     created = create_customer_order(payload)
 
     # Если заказ уже в доставке/доставлен — сразу делаем отгрузку
     if status in ("delivering", "delivered"):
-        try:
-            # БЫЛО: create_demand_from_order(created["meta"]["href"])
-            create_demand_from_order(created)
-        except Exception as e:
-            msg = f"[ORDERS] Ошибка создания отгрузки для заказа {order_name}: {e!r}"
-            print(msg)
-            try:
-                send_telegram_message(msg)
-            except Exception:
-                pass
-            raise
+        # БЫЛО: create_demand_from_order(created["meta"]["href"])
+        # Ошибки так же пойдут наверх в общий обработчик и CSV
+        create_demand_from_order(created)
 
 async def _sync_for_account(
     ozon_account: str,
