@@ -1,390 +1,276 @@
+# sync_orders.py
 import os
-import csv
-from datetime import datetime
-import requests
-import asyncio
+import sys
+import traceback
+from datetime import datetime, timedelta, timezone
+
 from dotenv import load_dotenv
-from ozon_client import get_fbs_postings as get_fbs_postings_ozon1
+
 from ms_client import (
-    find_product_by_article,
+    get_organization_by_name,
+    get_store_by_name,
+    get_or_create_counterparty,
+    get_ms_product_by_code,
     create_customer_order,
     find_customer_order_by_name,
-    update_customer_order_state,
-    clear_reserve_for_order,
+    get_customer_order_positions,
+    get_demand_by_customer_order,
     create_demand_from_order,
 )
-from telegram import Bot
-
-try:
-    from notifier import send_telegram_message, send_telegram_document
-except ImportError:
-    def send_telegram_message(text: str) -> bool:
-        print("Telegram notifier не доступен:", text)
-        return False
-
-    def send_telegram_document(path: str, caption: str | None = None) -> bool:
-        print(f"Telegram document не доступен: {path} {caption}")
-        return False
-
+from ozon_client import (
+    get_new_orders as get_new_orders_ozon1,
+    get_fbs_shipments as get_fbs_shipments_ozon1,
+)
+from ozon_client_trail import (
+    get_new_orders as get_new_orders_ozon2,
+    get_fbs_shipments as get_fbs_shipments_ozon2,
+)
+from telegram_logger import log_to_telegram, log_exception_to_telegram
 
 load_dotenv()
 
-# -----------------------------
-# Каналы продаж МойСклад для заказов
-# -----------------------------
+DRY_RUN = os.getenv("ORDERS_DRY_RUN", "false").lower() == "true"
 
-SALES_CHANNEL_AUTOMIX_META = {
-    "href": "https://api.moysklad.ru/api/remap/1.2/entity/saleschannel/fede2826-9fd0-11ee-0a80-0641000f3d25",
-    "type": "saleschannel",
-    "mediaType": "application/json",
-}
+ORGANIZATION_NAME = os.getenv("MS_ORGANIZATION_NAME", "ИП Комарицкий Д.С.")
+STORE_NAME = os.getenv("MS_STORE_NAME", "Основной склад")
 
-SALES_CHANNEL_TRAIL_META = {
-    "href": "https://api.moysklad.ru/api/remap/1.2/entity/saleschannel/ff2827b8-9fd0-11ee-0a80-0641000f3d31",
-    "type": "saleschannel",
-    "mediaType": "application/json",
-}
-
-DRY_RUN_ORDERS = os.getenv("DRY_RUN_ORDERS", "true").lower() == "true"
-
-MS_BASE_URL = os.getenv("MS_BASE_URL", "https://api.moysklad.ru/api/remap/1.2")
-MS_ORGANIZATION_HREF = os.getenv("MS_ORGANIZATION_HREF")
-MS_STORE_HREF = os.getenv("MS_STORE_HREF")
-MS_AGENT_HREF = os.getenv("MS_AGENT_HREF")
-
-MS_STATE_NEW_HREF = os.getenv("MS_STATE_NEW_HREF")  # состояние "Новый"
-MS_STATE_IN_PROGRESS_HREF = os.getenv("MS_STATE_IN_PROGRESS_HREF")
-MS_STATE_DONE_HREF = os.getenv("MS_STATE_DONE_HREF")
-
-OZON2_ENABLED = os.getenv("ENABLE_OZON2_ORDERS", "true").lower() == "true"
-
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-
-ERRORS_AUTO_FILE_PATH = "ozon_orders_errors_auto.csv"
-ERRORS_TRAIL_FILE_PATH = "ozon_orders_errors_trail.csv"
-
-if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
-    bot = Bot(token=TELEGRAM_TOKEN)
-else:
-    bot = None
+MS_TIMEZONE = timezone(timedelta(hours=3))  # Москва
 
 
-def _append_order_errors_to_file(path: str, rows: list[list[str]]) -> None:
+def parse_ozon_datetime(dt_str: str) -> datetime:
     """
-    Дописывает строки с ошибками в CSV-файл (UTF-8 с BOM).
+    Парсим дату-время из Ozon, возвращаем datetime в таймзоне МСК.
     """
-    if not rows:
-        return
-
-    file_exists = os.path.exists(path)
-
-    with open(path, "a", newline="", encoding="utf-8-sig") as f:
-        writer = csv.writer(f, delimiter=";")
-        if not file_exists:
-            writer.writerow(
-                ["Дата/время", "Ozon аккаунт", "Номер отправления", "Ошибка"]
-            )
-        for row in rows:
-            writer.writerow(row)
-
-
-def _format_ms_error(e: Exception) -> str:
-    """
-    Приводим ошибки МойСклад к человеку-понятному виду.
-    """
-    if isinstance(e, requests.HTTPError):
-        r = e.response
-        try:
-            data = r.json()
-        except Exception:
-            return f"HTTP {r.status_code}: {r.text[:500]}"
-
-        if r.status_code == 412:
-            errors = data.get("errors") or []
-            if errors:
-                err_msg = errors[0].get("error") or errors[0].get("message") or ""
-                if "Нельзя отгрузить товар, которого нет на складе" in err_msg:
-                    return (
-                        "МойСклад: нельзя отгрузить товар, которого нет на складе "
-                        "(остаток по складу Ozon = 0 или меньше)."
-                    )
-                return f"МойСклад вернул ошибку 412: {err_msg}"
-
-        if isinstance(data, dict) and data.get("errors"):
-            parts: list[str] = []
-            for err in data["errors"]:
-                msg = err.get("error") or err.get("message")
-                if msg:
-                    parts.append(msg)
-            if parts:
-                return f"МойСклад: {', '.join(parts)}"
-
-        return f"HTTP {r.status_code}: {r.text[:500]}"
-
-    return repr(e)
-
-
-def _send_telegram_error(ozon_account: str, posting_number: str, text: str) -> None:
-    """
-    Уведомление в Telegram + запись в CSV.
-    """
-    msg = f"[ORDERS] Ошибка по отправлению {posting_number} ({ozon_account}): {text}"
-    print(msg)
+    # Форматы вида: "2025-02-21T14:22:33Z" или "2025-02-21T14:22:33+03:00"
     try:
-        send_telegram_message(msg)
+        if dt_str.endswith("Z"):
+            dt = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
+        else:
+            dt = datetime.fromisoformat(dt_str)
     except Exception:
-        pass
+        return datetime.now(MS_TIMEZONE)
+
+    # Переводим в МСК
+    return dt.astimezone(MS_TIMEZONE)
 
 
-def _ms_get_state_meta_href(status: str) -> str | None:
+def build_order_name_from_ozon(order):
     """
-    Возвращает meta.href состояния заказа МойСклад по статусу отправления Ozon.
+    Генерируем name для заказа покупателя в МойСклад.
+    Можно использовать ozon_order_id или posting_number.
     """
-    if status in ("awaiting_packaging", "awaiting_deliver"):
-        return MS_STATE_NEW_HREF or MS_STATE_IN_PROGRESS_HREF
-    if status == "delivered":
-        return MS_STATE_DONE_HREF
-    return None
+    posting_number = order.get("posting_number")
+    if posting_number:
+        return posting_number
+    return f"ozon-{order.get('order_id')}"
 
 
-def process_posting(posting: dict, dry_run: bool) -> None:
+def build_ms_positions_from_ozon(order, account_name: str):
     """
-    Обработка одного FBS-отправления (оба кабинета):
-      - создаём/обновляем заказ в МойСклад
-      - в комментарий заказа пишем:
-          'FBS → Auto-MiX' для первого кабинета
-          'FBS → Trail Gear' для второго кабинета
-      - при статусах delivering/delivered создаём отгрузку
+    Создаём список позиций для МойСклад по заказу Ozon.
+    account_name нужен, если будут отличия между кабинетами.
     """
-    posting_number = posting.get("posting_number")
-    status = posting.get("status")
-    ozon_account = posting.get("_ozon_account") or "ozon1"
+    positions = []
+    for item in order.get("products", []):
+        offer_id = item.get("offer_id")  # наш артикул
+        quantity = item.get("quantity", 1)
+        price = item.get("price", 0)
 
-    # Номер заказа в МС = номеру в Ozon (БЕЗ префиксов)
-    order_name = posting_number or "UNKNOWN"
-
-    # Карта статусов
-    status_map = {
-        "awaiting_packaging": "ожидает сборки",
-        "awaiting_deliver": "ожидает передачи в доставку",
-        "delivering": "в доставке",
-        "delivered": "доставлен",
-        "cancelled": "отменён",
-    }
-    status_human = status_map.get(status, status)
-
-    # Готовим позиции для заказа в МойСклад
-    items = posting.get("products") or []
-    ms_positions: list[dict] = []
-
-    for item in items:
-        offer_id = item.get("offer_id")
-        quantity = item.get("quantity") or 0
-
-        if not offer_id or quantity <= 0:
+        if not offer_id:
+            print("[ORDERS] Пропущена позиция без offer_id")
             continue
 
-        product = find_product_by_article(offer_id)
-        if not product:
-            raise ValueError(f"Товар с артикулом {offer_id!r} не найден в МойСклад")
+        ms_assortment = get_ms_product_by_code(offer_id)
+        if not ms_assortment:
+            print(f"[ORDERS] В МойСклад не найден товар с артикулом {offer_id}")
+            continue
 
-        ms_positions.append(
+        positions.append(
             {
-                "ms_meta": product["meta"],
+                "assortment": ms_assortment,
                 "quantity": quantity,
+                "price": int(price * 100),
             }
         )
 
-    if not ms_positions:
-        raise ValueError("Не удалось добавить ни одной позиции с товарами МойСклад")
+    return positions
 
-    positions_payload = [
-        {
-            "quantity": pos["quantity"],
-            "assortment": {"meta": pos["ms_meta"]},
-        }
-        for pos in ms_positions
-    ]
 
-    org_meta = {
-        "href": MS_ORGANIZATION_HREF,
-        "type": "organization",
-        "mediaType": "application/json",
-    }
-    agent_meta = {
-        "href": MS_AGENT_HREF,
-        "type": "counterparty",
-        "mediaType": "application/json",
-    }
-    store_meta = {
-        "href": MS_STORE_HREF,
-        "type": "store",
-        "mediaType": "application/json",
-    }
+def ensure_ms_base_entities():
+    """
+    Проверяем, что в МойСклад есть организация и склад.
+    """
+    org = get_organization_by_name(ORGANIZATION_NAME)
+    if not org:
+        raise RuntimeError(f"Организация '{ORGANIZATION_NAME}' не найдена в МойСклад")
 
-    # Комментарий и канал продаж в заказе
-    if ozon_account in ("ozon2", "trail_gear"):
-        description = "FBS → Trail Gear"
-        sales_channel_meta = SALES_CHANNEL_TRAIL_META
-    else:
-        description = "FBS → Auto-MiX"
-        sales_channel_meta = SALES_CHANNEL_AUTOMIX_META
+    store = get_store_by_name(STORE_NAME)
+    if not store:
+        raise RuntimeError(f"Склад '{STORE_NAME}' не найден в МойСклад")
 
-    payload = {
-        "name": order_name,
-        "organization": {"meta": org_meta},
-        "agent": {"meta": agent_meta},
-        "store": {"meta": store_meta},
-        "positions": positions_payload,
-        "description": description,
-        "salesChannel": {"meta": sales_channel_meta},
-    }
+    return org, store
 
-    state_meta_href = _ms_get_state_meta_href(status)
-    if state_meta_href:
-        payload["state"] = {
-            "meta": {
-                "href": state_meta_href,
-                "type": "state",
-                "mediaType": "application/json",
-            }
-        }
 
-    print(
-        f"[ORDERS] Обработка отправления {posting_number} "
-        f"(аккаунт={ozon_account}, статус={status}), "
-        f"позиций: {len(positions_payload)}, DRY_RUN={dry_run}"
-    )
+def process_ozon_orders(ozon_orders: list[dict], account_name: str):
+    """
+    Создание/обновление заказов покупателей по новым заказам Ozon.
+    """
+    print(f"[ORDERS] Аккаунт={account_name}, получено заказов: {len(ozon_orders)}, DRY_RUN={DRY_RUN}")
 
-    if dry_run:
-        return
+    org, store = ensure_ms_base_entities()
 
-    # Проверяем, есть ли уже такой заказ
-    existing = find_customer_order_by_name(order_name)
-    if existing:
-        print(f"[ORDERS] Заказ {order_name} уже существует в МойСклад.")
-        if state_meta_href:
-            update_customer_order_state(existing["meta"]["href"], state_meta_href)
-
-        # При delivering/delivered создаём отгрузку и для существующего заказа
-        if status in ("delivering", "delivered"):
-            try:
-                # БЫЛО: create_demand_from_order(existing["meta"]["href"])
-                create_demand_from_order(existing)
-            except Exception as e:
-                msg = (
-                    f"[ORDERS] Ошибка создания отгрузки для существующего заказа "
-                    f"{order_name}: {e!r}"
-                )
-                print(msg)
-                try:
-                    send_telegram_message(msg)
-                except Exception:
-                    pass
-                raise
-        return
-
-        # Создаём новый заказ
-    created = create_customer_order(payload)
-
-    # Если заказ уже в доставке/доставлен — сразу делаем отгрузку
-    if status in ("delivering", "delivered"):
+    for order in ozon_orders:
         try:
-            # БЫЛО: create_demand_from_order(created["meta"]["href"])
-            create_demand_from_order(created)
+            posting_number = order.get("posting_number")
+            status = order.get("status")
+            print(
+                f"[ORDERS] Обработка заказа {posting_number} "
+                f"(аккаунт={account_name}, статус={status}), DRY_RUN={DRY_RUN}"
+            )
+
+            # Покупатель
+            buyer_name = order.get("customer", {}).get("name") or "Покупатель Ozon"
+            buyer_phone = order.get("customer", {}).get("phone")
+            buyer_email = order.get("customer", {}).get("email")
+
+            counterparty = get_or_create_counterparty(
+                name=buyer_name,
+                inn=None,
+                phone=buyer_phone,
+                email=buyer_email,
+            )
+
+            # Позиции
+            positions = build_ms_positions_from_ozon(order, account_name)
+
+            # Имя заказа
+            ms_order_name = build_order_name_from_ozon(order)
+
+            # Проверим, есть ли уже такой заказ в МойСклад
+            existing = find_customer_order_by_name(ms_order_name)
+            if existing:
+                print(f"[ORDERS] Заказ {ms_order_name} уже существует в МойСклад.")
+                if not DRY_RUN:
+                    # При желании можно обновлять позиции:
+                    # existing_href = existing["meta"]["href"]
+                    # update_customer_order_positions(existing_href, positions)
+                    pass
+                continue
+
+            if DRY_RUN:
+                print(f"[ORDERS] DRY_RUN: заказ {ms_order_name} не будет создан.")
+                continue
+
+            # Создаём заказ в МойСклад
+            created = create_customer_order(
+                organization=org,
+                agent=counterparty,
+                store=store,
+                name=ms_order_name,
+                positions=positions,
+                description=f"Ozon заказ {posting_number} (аккаунт: {account_name})",
+            )
+            print(f"[ORDERS] Создан заказ {created.get('name')} в МойСклад.")
+
         except Exception as e:
-            msg = f"[ORDERS] Ошибка создания отгрузки для заказа {order_name}: {e!r}"
-            print(msg)
+            tb = traceback.format_exc()
+            print(f"[ORDERS] Ошибка при обработке заказа Ozon: {e}\n{tb}")
+            log_exception_to_telegram(
+                f"Ошибка при обработке заказа Ozon (аккаунт={account_name}, posting={order.get('posting_number')}): {e}"
+            )
+
+
+def process_ozon_shipments(ozon_shipments: list[dict], account_name: str):
+    """
+    Обработка FBS-отправлений Ozon: создание отгрузок (demand) по существующим заказам покупателей.
+    """
+    print(f"[ORDERS] Аккаунт={account_name}, получено отправлений: {len(ozon_shipments)}, DRY_RUN={DRY_RUN}")
+
+    for shipment in ozon_shipments:
+        posting_number = shipment.get("posting_number")
+        status = shipment.get("status")
+        products = shipment.get("products", [])
+        print(
+            f"[ORDERS] Обработка отправления {posting_number} "
+            f"(аккаунт={account_name}, статус={status}), позиций: {len(products)}, DRY_RUN={DRY_RUN}"
+        )
+
+        try:
+            # Ищем заказ в МойСклад по имени, совпадающему с posting_number
+            ms_order = find_customer_order_by_name(posting_number)
+            if not ms_order:
+                print(f"[ORDERS] В МойСклад не найден заказ с именем {posting_number}. Пропуск.")
+                continue
+
+            order_href = ms_order["meta"]["href"]
+
+            # Проверяем, есть ли уже отгрузка по этому заказу
+            existing_demand = get_demand_by_customer_order(order_href)
+            if existing_demand:
+                print(f"[ORDERS] Отгрузка по заказу {posting_number} уже существует в МойСклад.")
+                continue
+
+            if DRY_RUN:
+                print(f"[ORDERS] DRY_RUN: отгрузка по заказу {posting_number} создаваться не будет.")
+                continue
+
+            # Создаем отгрузку на основании заказа покупателя
+            print(f"[ORDERS] Создание отгрузки по существующему заказу {posting_number}...")
             try:
-                send_telegram_message(msg)
-            except Exception:
-                pass
-            raise
+                created_demand = create_demand_from_order(order_href)
+                print(
+                    f"[ORDERS] Создана отгрузка {created_demand.get('name')} "
+                    f"по заказу {posting_number} в МойСклад."
+                )
+            except Exception as e_demand:
+                print(
+                    f"[ORDERS] Ошибка создания отгрузки для существующего заказа {posting_number}: {e_demand}"
+                )
+                log_exception_to_telegram(
+                    f"Ошибка создания отгрузки для существующего заказа {posting_number} (аккаунт={account_name}): {e_demand}"
+                )
+                continue
 
-async def _sync_for_account(
-    ozon_account: str,
-    dry_run: bool,
-    limit: int,
-) -> list[list[str]]:
-    """
-    Синхронизация заказов по одному аккаунту Ozon.
-    Возвращает список строк-ошибок для CSV.
-    """
-    errors: list[list[str]] = []
+        except Exception as e:
+            tb = traceback.format_exc()
+            print(
+                f"[ORDERS] Ошибка по отправлению {posting_number} ({account_name}): {e}\n{tb}"
+            )
+            log_exception_to_telegram(
+                f"Ошибка по отправлению {posting_number} ({account_name}): {e}"
+            )
 
-    if ozon_account == "ozon1":
-        from ozon_client import get_fbs_postings as get_postings
-    else:
-        from ozon_client2 import get_fbs_postings as get_postings
+
+def main():
+    print("Запуск синхронизации заказов Ozon с МойСклад...")
 
     try:
-        data = get_postings(limit=limit)
+        # Новый период: последние 7 дней
+        date_from = datetime.now(tz=MS_TIMEZONE) - timedelta(days=7)
+
+        # --- Ozon 1 (Auto-MiX) ---
+        ozon1_orders = get_new_orders_ozon1(date_from=date_from)
+        ozon1_shipments = get_fbs_shipments_ozon1(date_from=date_from)
+
+        # --- Ozon 2 (Trail Gear) ---
+        ozon2_orders = get_new_orders_ozon2(date_from=date_from)
+        ozon2_shipments = get_fbs_shipments_ozon2(date_from=date_from)
+
+        # Обработка заказов
+        process_ozon_orders(ozon1_orders, account_name="ozon1")
+        process_ozon_orders(ozon2_orders, account_name="ozon2")
+
+        # Обработка FBS-отправлений (создание отгрузок)
+        process_ozon_shipments(ozon1_shipments, account_name="ozon1")
+        process_ozon_shipments(ozon2_shipments, account_name="ozon2")
+
+        log_to_telegram("Синхронизация заказов и отгрузок Ozon ↔ МойСклад завершена.")
+
     except Exception as e:
-        err_text = f"Не удалось получить FBS-отправления: {e!r}"
-        print(f"[ORDERS] {err_text}")
-        try:
-            send_telegram_message(f"[ORDERS] {err_text}")
-        except Exception:
-            pass
-        return errors
-
-    postings = (data or {}).get("result", {}).get("postings") or []
-
-    print(
-        f"[ORDERS] Аккаунт={ozon_account}, получено отправлений: {len(postings)}, "
-        f"DRY_RUN={dry_run}"
-    )
-
-    for posting in postings:
-        posting["_ozon_account"] = ozon_account
-        posting_number = posting.get("posting_number") or "UNKNOWN"
-
-        try:
-            process_posting(posting, dry_run=dry_run)
-        except Exception as e:
-            err_text = _format_ms_error(e)
-            errors.append(
-                [
-                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    ozon_account,
-                    posting_number,
-                    err_text,
-                ]
-            )
-            _send_telegram_error(ozon_account, posting_number, err_text)
-
-    return errors
-
-
-def sync_fbs_orders(dry_run: bool = True, limit: int = 100) -> None:
-    """
-    Основная функция синхронизации FBS-отправлений из Ozon в МойСклад.
-    Работает сразу по двум аккаунтам (если включен второй).
-    """
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-
-    tasks = [
-        _sync_for_account("ozon1", dry_run=dry_run, limit=limit),
-    ]
-
-    if OZON2_ENABLED:
-        tasks.append(_sync_for_account("ozon2", dry_run=dry_run, limit=limit))
-
-    errors_auto, errors_trail = loop.run_until_complete(asyncio.gather(*tasks))
-    loop.close()
-
-    # После обработки заказов — пишем CSV и отправляем ДВА файла с ошибками
-    _append_order_errors_to_file(ERRORS_AUTO_FILE_PATH, errors_auto)
-    _append_order_errors_to_file(ERRORS_TRAIL_FILE_PATH, errors_trail)
-
-    if errors_auto:
-        send_telegram_document(ERRORS_AUTO_FILE_PATH, caption="Ошибки Auto-MiX")
-    if errors_trail:
-        send_telegram_document(ERRORS_TRAIL_FILE_PATH, caption="Ошибки Trail Gear")
+        tb = traceback.format_exc()
+        print(f"[ORDERS] Общая ошибка при синхронизации: {e}\n{tb}")
+        log_exception_to_telegram(f"Общая ошибка при синхронизации заказов Ozon: {e}")
 
 
 if __name__ == "__main__":
-    print("Запуск синхронизации заказов Ozon с МойСклад...")
-    sync_fbs_orders(dry_run=DRY_RUN_ORDERS, limit=300)
+    main()
