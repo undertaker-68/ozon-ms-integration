@@ -270,27 +270,69 @@ def get_bundle_components(bundle_meta_href: str):
     return data.get("rows", [])
 
 
-def compute_bundle_available(components: list[dict], stock_by_product_href: dict[str, int]) -> int:
+def compute_bundle_available(row, stock_by_href) -> int:
     """
-    Расчёт доступного количества комплекта по компонентам.
+    Вычисляет доступное количество комплекта (bundle) по строке отчёта остатков.
 
-    :param components: список компонентов (как вернул get_bundle_components)
-    :param stock_by_product_href: словарь {href товара: доступный остаток}
-    :return: доступное количество комплекта
+    :param row: строка из отчёта остатков по складу (одна позиция)
+    :param stock_by_href: словарь {href товара: доступный остаток по выбранному складу}
     """
-    if not components:
+    # В отчёте по остаткам для комплекта обычно есть список components
+    components = row.get("components") or []
+
+    # Если components не список — считаем, что посчитать ничего нельзя
+    if not isinstance(components, list):
         return 0
 
-    bundle_counts = []
-    for comp in components:
-        product_meta = comp.get("meta", {})
-        product_href = product_meta.get("href")
-        quantity_in_bundle = comp.get("quantity") or 0
+    bundle_limit = None  # минимальное количество комплекта по всем компонентам
 
-        if not product_href or quantity_in_bundle <= 0:
+    for comp in components:
+        # На всякий случай защищаемся от мусора (строки, числа и т.п.)
+        if not isinstance(comp, dict):
             continue
 
-        available = stock_by_product_href.get(product_href, 0)
-        bundle_counts.append(available // quantity_in_bundle if quantity_in_bundle else 0)
+        # Сколько единиц компонента нужно на один комплект
+        qty_required = comp.get("quantity") or 1
+        try:
+            qty_required = int(qty_required)
+        except (TypeError, ValueError):
+            qty_required = 1
 
-    return min(bundle_counts) if bundle_counts else 0
+        # Ассортимент компонента может лежать в comp["assortment"]["meta"]["href"]
+        comp_assort = comp.get("assortment") or {}
+        if isinstance(comp_assort, dict):
+            meta = comp_assort.get("meta") or {}
+        else:
+            meta = {}
+
+        if not isinstance(meta, dict):
+            meta = {}
+
+        href = meta.get("href")
+        if not href or qty_required <= 0:
+            # Если нет href или количество странное — пропускаем компонент
+            continue
+
+        # Остаток по этому компоненту на выбранном складе
+        available = stock_by_href.get(href, 0)
+
+        # Если по компоненту нет остатка — весь комплект = 0
+        if available <= 0:
+            bundle_limit = 0
+            break
+
+        # Сколько комплектов можно собрать из этого компонента
+        try:
+            comp_limit = int(available) // qty_required
+        except Exception:
+            comp_limit = 0
+
+        # Берём минимум по всем компонентам
+        if bundle_limit is None or comp_limit < bundle_limit:
+            bundle_limit = comp_limit
+
+    if bundle_limit is None:
+        # Не смогли ничего посчитать (нет валидных компонентов) — считаем, что нет комплекта
+        return 0
+
+    return max(int(bundle_limit), 0)
