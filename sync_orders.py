@@ -295,6 +295,30 @@ async def _sync_for_account(
         posting["_ozon_account"] = ozon_account
         posting_number = posting.get("posting_number") or "UNKNOWN"
 
+        # --- ОТСЕЧКА по дате создания в ЛК Ozon ---
+        created_date_str = posting.get("created")
+        created_date = None
+        if created_date_str:
+            # Берём только дату YYYY-MM-DD из строки
+            try:
+                created_date = datetime.strptime(created_date_str[:10], "%Y-%m-%d")
+            except Exception:
+                created_date = None
+
+        hard_cutoff = datetime(2025, 12, 2)
+        # Всё, что создано 02.12.2025 и раньше — не синхронизируем
+        if created_date and created_date <= hard_cutoff:
+            print(
+                f"[ORDERS] Аккаунт={ozon_account}, отправление {posting_number} "
+                f"создано {created_date_str}, ≤ 02.12.2025 — пропускаем."
+            )
+            continue
+        # --- конец отсечки ---
+
+        try:
+            process_posting(posting, dry_run=dry_run)
+        except Exception as e:
+        
         try:
             process_posting(posting, dry_run=dry_run)
         except Exception as e:
