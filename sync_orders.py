@@ -162,24 +162,13 @@ def process_posting(posting: dict, dry_run: bool) -> None:
     # Номер заказа в МС = номеру в Ozon (БЕЗ префиксов)
     order_name = posting_number or "UNKNOWN"
 
-    # Карта статусов
-    status_map = {
-        "awaiting_packaging": "ожидает сборки",
-        "awaiting_deliver": "ожидает передачи в доставку",
-        "delivering": "в доставке",
-        "delivered": "доставлен",
-        "cancelled": "отменён",
-    }
-    status_human = status_map.get(status, status)
-
-    # Готовим позиции для заказа в МойСклад
+    # Позиции заказа
     items = posting.get("products") or []
     ms_positions: list[dict] = []
 
     for item in items:
         offer_id = item.get("offer_id")
         quantity = item.get("quantity") or 0
-
         if not offer_id or quantity <= 0:
             continue
 
@@ -221,7 +210,7 @@ def process_posting(posting: dict, dry_run: bool) -> None:
         "mediaType": "application/json",
     }
 
-    # Комментарий и канал продаж в заказе
+    # Комментарий и канал продаж
     if ozon_account in ("ozon2", "trail_gear"):
         description = "FBS → Trail Gear"
         sales_channel_meta = SALES_CHANNEL_TRAIL_META
@@ -258,29 +247,15 @@ def process_posting(posting: dict, dry_run: bool) -> None:
     if dry_run:
         return
 
-    # Проверяем, есть ли уже такой заказ
-        existing = find_customer_order_by_name(order_name)
+    # --- ДАЛЬШЕ ЛОГИКА БЕЗ ЗАПУТЫВАНИЯ С existing ---
+
+    existing = find_customer_order_by_name(order_name)
+
+    # Если заказ уже есть
     if existing:
         print(f"[ORDERS] Заказ {order_name} уже существует в МойСклад.")
         if state_meta_href:
-            update_customer_order_state(existing["meta"]["href"], state_meta_href)
-
-        # При delivering/delivered создаём отгрузку и для существующего заказа
-        if status in ("delivering", "delivered"):
-            # БЫЛО: create_demand_from_order(existing["meta"]["href"])
-            # Ошибки пробрасываем наверх, чтобы они попали в CSV, но без отдельного сообщения в Телеграм
-            create_demand_from_order(existing)
-            
-        return
-
-           # Создаём новый заказ
-    created = create_customer_order(payload)
-
-    # Если заказ уже в доставке/доставлен — сразу делаем отгрузку
-    if status in ("delivering", "delivered"):
-        # БЫЛО: create_demand_from_order(created["meta"]["href"])
-        # Ошибки так же пойдут наверх в общий обработчик и CSV
-        create_demand_from_order(created)
+            update_cu_
 
 async def _sync_for_account(
     ozon_account: str,
