@@ -371,6 +371,11 @@ def create_demand_from_order(order: dict) -> dict:
             for pos in positions
         ],
     }
+    
+        # === Название отгрузки = номер отправления (имя заказа) ===
+    demand_name = order.get("name")
+    if demand_name:
+        demand_payload["name"] = demand_name
 
     url = f"{BASE_URL}/entity/demand"
     return _ms_post(url, demand_payload)
