@@ -303,7 +303,7 @@ async def _sync_for_account(
         f"DRY_RUN={dry_run}"
     )
 
-        for posting in postings:
+    for posting in postings:
         posting["_ozon_account"] = ozon_account
         posting_number = posting.get("posting_number") or "UNKNOWN"
 
@@ -316,7 +316,7 @@ async def _sync_for_account(
             except Exception:
                 created_date = None
 
-        hard_cutoff = datetime(2025, 12, 2)
+        hard_cutoff = datetime(2025, 12, 2)  # всё, что создано <= 02.12.2025, не синхронизируем
 
         if created_date and created_date <= hard_cutoff:
             print(
