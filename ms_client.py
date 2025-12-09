@@ -345,46 +345,41 @@ def clear_reserve_for_order(order_href: str) -> None:
 def create_demand_from_order(order: dict) -> dict:
     """
     Создать отгрузку (demand) на основании заказа покупателя.
-    Гарантированно корректно работает как с новыми, так и с существующими заказами.
+
+    Работает и для только что созданного заказа (created),
+    и для уже существующего (existing).
     """
     order_meta = order.get("meta") or {}
     order_href = order_meta.get("href")
     if not order_href:
         raise ValueError("У заказа нет meta.href, не можем создать отгрузку")
 
-    # Загружаем ПОЛНЫЙ заказ (обязательно!)
-    # В existing-заказе нет organization/agent/store/positions
-    full_order = _ms_get_by_href(order_href)
+    # 1) Получаем черновик отгрузки от МойСклад
+    #    /entity/demand/new сам подставит organization, agent, store, позиции и т.п.
+    url_new = f"{BASE_URL}/entity/demand/new"
+    params = {"customerOrder": order_href}
+    draft = _ms_get(url_new, params)
 
-    # Если даже полный заказ пустой — ошибка
-    if not full_order:
-        raise ValueError("Не удалось загрузить полный заказ из МойСклад")
-
-    # Позиции
-    positions = full_order.get("positions") or []
-    fixed_positions = []
+    # 2) Аккуратно нормализуем позиции (бывает, что в черновике формат разный)
+    positions = draft.get("positions") or []
+    fixed_positions: list[dict] = []
     for pos in positions:
+        if not isinstance(pos, dict):
+            continue
         fixed_positions.append(
             {
                 "quantity": pos.get("quantity", 0),
                 "assortment": pos.get("assortment"),
             }
         )
+    draft["positions"] = fixed_positions
 
-    # Формируем корректный payload
-    demand_payload = {
-        "customerOrder": {"meta": full_order["meta"]},
-        "organization": full_order["organization"],
-        "agent": full_order["agent"],
-        "store": full_order["store"],
-        "positions": fixed_positions,
-    }
-
-    # === Название отгрузки = номер отправления (имя заказа) ===
-    demand_name = full_order.get("name")
+    # 3) Имя отгрузки = имя заказа (номер отправления),
+    #    чтобы тебе было удобно сверять
+    demand_name = order.get("name")
     if demand_name:
-        demand_payload["name"] = demand_name
+        draft["name"] = demand_name
 
-    # Создаём отгрузку
+    # 4) Создаём отгрузку
     url = f"{BASE_URL}/entity/demand"
-    return _ms_post(url, demand_payload)
+    return _ms_post(url, draft)
