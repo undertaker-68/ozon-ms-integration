@@ -291,7 +291,7 @@ async def _sync_for_account(
         f"DRY_RUN={dry_run}"
     )
 
-    for posting in postings:
+        for posting in postings:
         posting["_ozon_account"] = ozon_account
         posting_number = posting.get("posting_number") or "UNKNOWN"
 
@@ -299,14 +299,13 @@ async def _sync_for_account(
         created_date_str = posting.get("created")
         created_date = None
         if created_date_str:
-            # Берём только дату YYYY-MM-DD из строки
             try:
                 created_date = datetime.strptime(created_date_str[:10], "%Y-%m-%d")
             except Exception:
                 created_date = None
 
         hard_cutoff = datetime(2025, 12, 2)
-        # Всё, что создано 02.12.2025 и раньше — не синхронизируем
+
         if created_date and created_date <= hard_cutoff:
             print(
                 f"[ORDERS] Аккаунт={ozon_account}, отправление {posting_number} "
@@ -315,10 +314,6 @@ async def _sync_for_account(
             continue
         # --- конец отсечки ---
 
-        try:
-            process_posting(posting, dry_run=dry_run)
-        except Exception as e:
-        
         try:
             process_posting(posting, dry_run=dry_run)
         except Exception as e:
@@ -334,7 +329,6 @@ async def _sync_for_account(
             _send_telegram_error(ozon_account, posting_number, err_text)
 
     return errors
-
 
 def sync_fbs_orders(dry_run: bool = True, limit: int = 100) -> None:
     """
