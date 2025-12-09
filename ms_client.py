@@ -19,35 +19,27 @@ session.headers.update({
 
 
 # -------------------------------------------------
-# 🔎  ✔ Функция поиска товара по артикулу (добавлена)
+# 🔎 Поиск товара / комплекта по артикулу
 # -------------------------------------------------
 def find_product_by_article(article: str):
-    """
-    Находит товар или комплект (bundle) в МойСклад по артикулу.
-    Возвращает объект с meta.
-    """
     if not article:
         return None
 
-    # ---- Сначала ищем обычный товар ----
-    url = f"{BASE_URL}/entity/product"
-    params = {"filter": f"article={article}", "limit": 1}
-
+    # 1) Ищем product
     try:
-        resp = session.get(url, params=params)
-        data = resp.json()
-        rows = data.get("rows") or []
+        url = f"{BASE_URL}/entity/product"
+        resp = session.get(url, params={"filter": f"article={article}", "limit": 1})
+        rows = resp.json().get("rows") or []
         if rows:
             return rows[0]
-    except Exception as e:
-        print(f"[MS] Ошибка поиска товара: {e}")
+    except Exception:
+        pass
 
-    # ---- Если нет — ищем комплект ----
-    url = f"{BASE_URL}/entity/bundle"
+    # 2) Ищем bundle
     try:
-        resp = session.get(url, params=params)
-        data = resp.json()
-        rows = data.get("rows") or []
+        url = f"{BASE_URL}/entity/bundle"
+        resp = session.get(url, params={"filter": f"article={article}", "limit": 1})
+        rows = resp.json().get("rows") or []
         if rows:
             return rows[0]
     except Exception:
@@ -57,28 +49,16 @@ def find_product_by_article(article: str):
 
 
 # -------------------------------------------------
-# 🌟 Получение ассортимента + остатков по складу
+# 📦 Получение ассортимента по складу
 # -------------------------------------------------
 def get_assortment(store_id: str):
-    """
-    Возвращает список позиций на складе:
-    - products
-    - bundles
-    - services (при необходимости)
-    """
     url = f"{BASE_URL}/report/stock/all"
-    params = {
-        "store.id": store_id,
-        "limit": 1000,
-        "offset": 0
-    }
+    params = {"store.id": store_id, "limit": 1000, "offset": 0}
 
     all_rows = []
-
     while True:
         resp = session.get(url, params=params)
         data = resp.json()
-
         rows = data.get("rows") or []
         all_rows.extend(rows)
 
@@ -91,54 +71,105 @@ def get_assortment(store_id: str):
 
 
 # -------------------------------------------------
-# 📦 Получение состава комплекта (bundle)
+# 📦 Получение состава комплекта
 # -------------------------------------------------
 def get_bundle_components(bundle_meta_href: str):
-    """
-    Получение компонентов комплекта (bundle):
-    Возвращает:
-      [
-         { "meta": {...}, "quantity": X },
-         ...
-      ]
-    """
     try:
-        url = f"{bundle_meta_href}/components"
-        resp = session.get(url)
+        resp = session.get(f"{bundle_meta_href}/components")
         data = resp.json()
 
-        return [
-            {
-                "meta": c.get("assortment", {}).get("meta"),
-                "quantity": c.get("quantity", 1)
-            }
-            for c in (data.get("rows") or [])
-            if c.get("assortment", {}).get("meta")
-        ]
+        result = []
+        for c in data.get("rows") or []:
+            if "assortment" in c and "meta" in c["assortment"]:
+                result.append({
+                    "meta": c["assortment"]["meta"],
+                    "quantity": c.get("quantity", 1)
+                })
+
+        return result
     except Exception:
         return []
 
 
+# =================================================
+# 🔥 --- ВОССТАНОВЛЕННЫЕ ФУНКЦИИ ДЛЯ sync_stock.py ---
+# =================================================
+
+def get_stock_all(store_id: str):
+    """
+    Возвращает словарь SKU → остаток.
+    Взято из ассортимента.
+    """
+    rows = get_assortment(store_id)
+
+    stock = {}
+    for r in rows:
+        article = r.get("article") or r.get("code")
+        if not article:
+            continue
+
+        stock[article] = {
+            "quantity": r.get("stock", 0),
+            "reserve": r.get("reserve", 0),
+            "free": (r.get("stock", 0) - r.get("reserve", 0)),
+            "meta": r.get("meta"),
+            "isBundle": r.get("meta", {}).get("type") == "bundle"
+        }
+
+    return stock
+
+
+def compute_bundle_available(bundle_meta_href: str, stock_dict: dict):
+    """
+    Корректный расчёт комплекта:
+    Остаток = min(остаток компонента / требуемое_количество)
+    """
+    components = get_bundle_components(bundle_meta_href)
+    if not components:
+        return 0
+
+    available_list = []
+
+    for comp in components:
+        meta = comp["meta"]
+        qty_needed = comp["quantity"]
+
+        comp_href = meta.get("href")
+        if not comp_href:
+            available_list.append(0)
+            continue
+
+        # находим строку в stock_dict по href
+        found_free = None
+        for art, row in stock_dict.items():
+            if row.get("meta", {}).get("href") == comp_href:
+                found_free = row["free"]
+                break
+
+        if found_free is None:
+            available_list.append(0)
+        else:
+            available_list.append(found_free // qty_needed)
+
+    return min(available_list) if available_list else 0
+
+
 # -------------------------------------------------
-# 📦 Создание заказа
+# 📄 Создание заказа
 # -------------------------------------------------
 def create_customer_order(payload: dict):
-    url = f"{BASE_URL}/entity/customerorder"
-    resp = session.post(url, json=payload)
+    resp = session.post(f"{BASE_URL}/entity/customerorder", json=payload)
     resp.raise_for_status()
     return resp.json()
 
 
 # -------------------------------------------------
-# 🔍 Поиск заказа по номеру
+# 🔍 Поиск заказа
 # -------------------------------------------------
 def find_customer_order_by_name(name: str):
-    url = f"{BASE_URL}/entity/customerorder"
-    params = {"filter": f"name={name}", "limit": 1}
-
-    resp = session.get(url, params=params)
-    data = resp.json()
-    rows = data.get("rows") or []
+    resp = session.get(f"{BASE_URL}/entity/customerorder",
+                       params={"filter": f"name={name}", "limit": 1})
+    rows = resp.json().get("rows") or []
     return rows[0] if rows else None
 
 
@@ -146,7 +177,6 @@ def find_customer_order_by_name(name: str):
 # 🔄 Обновление состояния заказа
 # -------------------------------------------------
 def update_customer_order_state(order_id: str, state_href: str):
-    url = f"{BASE_URL}/entity/customerorder/{order_id}"
     payload = {
         "state": {
             "meta": {
@@ -156,35 +186,27 @@ def update_customer_order_state(order_id: str, state_href: str):
             }
         }
     }
-
-    resp = session.put(url, json=payload)
+    resp = session.put(f"{BASE_URL}/entity/customerorder/{order_id}", json=payload)
     resp.raise_for_status()
     return resp.json()
 
 
 # -------------------------------------------------
-# 🔥 Снятие резерва
+# ❗ Снятие резерва
 # -------------------------------------------------
 def clear_reserve_for_order(order_id: str):
-    """
-    Удаляет резерв из заказа (если нужно).
-    """
-    url = f"{BASE_URL}/entity/customerorder/{order_id}"
-    payload = {"reservedSum": 0}
-
-    resp = session.put(url, json=payload)
+    resp = session.put(
+        f"{BASE_URL}/entity/customerorder/{order_id}",
+        json={"reservedSum": 0}
+    )
     resp.raise_for_status()
     return resp.json()
 
 
 # -------------------------------------------------
-# 🚚 Создание отгрузки (demand) из заказа
+# 🚚 Создание отгрузки createDemand
 # -------------------------------------------------
 def create_demand_from_order(order_obj: dict):
-    """
-    Создаёт отгрузку (demand) из объекта заказа.
-    order_obj — это JSON заказа (не ссылка).
-    """
     meta = order_obj.get("meta")
     if not meta:
         raise ValueError("order_obj.meta отсутствует")
@@ -194,8 +216,6 @@ def create_demand_from_order(order_obj: dict):
         raise ValueError("order.meta.href отсутствует")
 
     url = f"{order_href}/createDemand"
-
     resp = session.post(url)
     resp.raise_for_status()
-
     return resp.json()
