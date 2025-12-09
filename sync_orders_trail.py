@@ -323,7 +323,7 @@ def sync_fbs_orders(dry_run: bool, limit: int = 300):
     print(f"[ORDERS TG] Найдено отправлений: {len(postings)}")
 
     # Ограничение по дате
-    cutoff_date = datetime(2025, 11, 30)
+    cutoff_date = datetime(2025, 12, 2)
 
     error_rows: list[dict] = []
 
@@ -338,9 +338,10 @@ def sync_fbs_orders(dry_run: bool, limit: int = 300):
             except Exception:
                 created_date = None
 
-        if created_date and created_date < cutoff_date:
+        if created_date and created_date <= cutoff_date:
             print(
-                f"[ORDERS TG] Заказ {posting.get('posting_number')} создан до 30.11.2025, пропускаем."
+                f"[ORDERS TG] Заказ {posting.get('posting_number')}"
+                f"создан ≤ 02.12.2025, пропускаем."
             )
             continue
 
