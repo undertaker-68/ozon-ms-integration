@@ -343,64 +343,60 @@ def clear_reserve_for_order(order_href: str) -> None:
 
 def create_demand_from_order(order_href: str) -> dict:
     """
-    Создать отгрузку (demand) на основании уже существующего заказа покупателя.
+    Создать отгрузку (demand) по заказу покупателя.
 
-    order_href – это meta.href заказа вида:
-    https://api.moysklad.ru/api/remap/1.2/entity/customerorder/{uuid}
+    На вход подаём meta.href заказа (customerorder),
+    как это делает sync_orders.py:
+        create_demand_from_order(existing["meta"]["href"])
     """
-    # 1. Читаем позиции заказа
-    positions_url = f"{order_href}/positions"
-    positions_data = _ms_get(positions_url, {"expand": "assortment"})
-    rows = positions_data.get("rows") or []
 
-    positions_payload: list[dict] = []
-    for pos in rows:
-        positions_payload.append(
-            {
-                "quantity": pos.get("quantity", 0),
-                "assortment": pos.get("assortment"),
-            }
-        )
+    if not order_href:
+        raise ValueError("order_href is empty")
 
-    # 2. Собираем payload отгрузки
-    demand_payload = {
-        "customerOrder": {
-            "meta": {
-                "href": order_href,
-                "type": "customerorder",
-                "mediaType": "application/json",
-            }
-        },
-        "organization": {
-            "meta": {
-                "href": MS_ORGANIZATION_HREF,
-                "type": "organization",
-                "mediaType": "application/json",
-            }
-        },
-        "agent": {
-            "meta": {
-                "href": MS_AGENT_HREF,
-                "type": "counterparty",
-                "mediaType": "application/json",
-            }
-        },
-        "store": {
-            "meta": {
-                "href": MS_STORE_HREF,
-                "type": "store",
-                "mediaType": "application/json",
-            }
-        },
-        "positions": positions_payload,
+    # 1. Загружаем сам заказ
+    order = _ms_get_by_href(order_href)
+    if not order:
+        raise RuntimeError(f"Не удалось получить заказ по href: {order_href}")
+
+    customer_order_meta = order.get("meta") or {}
+    if not customer_order_meta.get("href"):
+        raise RuntimeError(f"У заказа нет meta.href: {order!r}")
+
+    # 2. Загружаем позиции заказа
+    positions_meta = (order.get("positions") or {}).get("meta", {})
+    positions_href = positions_meta.get("href")
+
+    demand_positions: list[dict] = []
+
+    if positions_href:
+        pos_data = _ms_get_by_href(positions_href)
+        for pos in (pos_data.get("rows") or []):
+            assortment = pos.get("assortment")
+            if not assortment:
+                continue
+            demand_positions.append(
+                {
+                    "quantity": pos.get("quantity", 0),
+                    "assortment": assortment,
+                }
+            )
+
+    # 3. Формируем тело отгрузки
+    payload: dict = {
+        # Связь с заказом покупателя
+        "customerOrder": {"meta": customer_order_meta},
+        # Позиции отгрузки = позиции заказа
+        "positions": demand_positions,
     }
 
-    # 3. Создаём отгрузку
+    # Копируем главные реквизиты из заказа:
+    # организация, контрагент, склад, владелец, группа
+    for key in ("organization", "agent", "store", "owner", "group"):
+        if isinstance(order.get(key), dict) and "meta" in order[key]:
+            payload[key] = {"meta": order[key]["meta"]}
+
+    # 4. Создаём отгрузку
     url = f"{BASE_URL}/entity/demand"
-    r_post = requests.post(url, headers=HEADERS, json=demand_payload, timeout=30)
-    if r_post.status_code >= 400:
-        print(
-            f"[MS ERROR] create_demand status={r_post.status_code} body={r_post.text[:500]}"
-        )
-    r_post.raise_for_status()
-    return r_post.json()
+    resp = _ms_post(url, payload)
+    print(f"[MS] Создана отгрузка по заказу {order.get('name')} -> demand {resp.get('id')}")
+    return resp
