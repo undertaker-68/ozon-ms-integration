@@ -345,30 +345,32 @@ def clear_reserve_for_order(order_href: str) -> None:
 def create_demand_from_order(order: dict) -> dict:
     """
     Создать отгрузку (demand) на основании заказа покупателя.
+    Без /entity/demand/new – сразу POST /entity/demand.
     """
-    url = f"{BASE_URL}/entity/demand/new"
-    params = {
-        "customerOrder": order.get("meta", {}).get("href"),
-    }
-    data = _ms_get(url, params)
+    order_meta = order.get("meta") or {}
+    order_href = order_meta.get("href")
+    if not order_href:
+        raise ValueError("У заказа нет meta.href, не можем создать отгрузку")
 
-    demand_payload = data
-    positions = demand_payload.get("positions") or []
-    fixed_positions = []
-    for pos in positions:
-        fixed_positions.append(
+    # Если в объекте заказа нет позиций – добираем полный заказ по href
+    if not order.get("positions"):
+        order = _ms_get_by_href(order_href)
+
+    positions = order.get("positions") or []
+
+    demand_payload = {
+        "customerOrder": {"meta": order["meta"]},
+        "organization": order["organization"],
+        "agent": order["agent"],
+        "store": order["store"],
+        "positions": [
             {
                 "quantity": pos.get("quantity", 0),
                 "assortment": pos.get("assortment"),
             }
-        )
-    demand_payload["positions"] = fixed_positions
+            for pos in positions
+        ],
+    }
 
     url = f"{BASE_URL}/entity/demand"
-    r_post = requests.post(url, headers=HEADERS, json=demand_payload, timeout=30)
-    if r_post.status_code >= 400:
-        print(
-            f"[MS ERROR] create_demand status={r_post.status_code} body={r_post.text[:500]}"
-        )
-    r_post.raise_for_status()
-    return r_post.json()
+    return _ms_post(url, demand_payload)
