@@ -1,221 +1,367 @@
+import base64
+import logging
 import os
+from typing import Any, Dict, List, Optional, Tuple
+
 import requests
 from dotenv import load_dotenv
 
+# Загружаем переменные окружения из .env
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 MS_LOGIN = os.getenv("MS_LOGIN")
 MS_PASSWORD = os.getenv("MS_PASSWORD")
+MS_PROJECT_OZON_FBS = os.getenv("MS_PROJECT_OZON_FBS")  # href проекта для Ozon FBS
+MS_OZON_STORE_HREF = os.getenv("MS_OZON_STORE_HREF")  # href склада, который используем как дефолт
+MS_ORGANIZATION_HREF = os.getenv("MS_ORGANIZATION_HREF")  # href юр.лица
+MS_AGENT_HREF = os.getenv("MS_AGENT_HREF")  # href контрагента Ozon
+MS_CUSTOMER_ORDER_STATE_NEW = os.getenv("MS_CUSTOMER_ORDER_STATE_NEW")  # href статуса "Новый заказ"
+MS_CUSTOMER_ORDER_STATE_IN_WORK = os.getenv("MS_CUSTOMER_ORDER_STATE_IN_WORK")  # href статуса "В работе"
+MS_CUSTOMER_ORDER_STATE_DONE = os.getenv("MS_CUSTOMER_ORDER_STATE_DONE")  # href статуса "Выполнен"
+MS_ATTR_OZON_POSTING_NUMBER = os.getenv("MS_ATTR_OZON_POSTING_NUMBER")  # href атрибута "Номер отправления Ozon"
+MS_ATTR_DELIVERY_DATE = os.getenv("MS_ATTR_DELIVERY_DATE")  # href атрибута "Дата отгрузки"
+MS_ATTR_DELIVERY_METHOD = os.getenv("MS_ATTR_DELIVERY_METHOD")  # href атрибута "Способ доставки"
+MS_ATTR_WAREHOUSE_FROM = os.getenv("MS_ATTR_WAREHOUSE_FROM")  # href атрибута "Склад отгрузки"
+MS_ATTR_DELIVERY_SERVICE = os.getenv("MS_ATTR_DELIVERY_SERVICE")  # href атрибута "Служба доставки"
+MS_ATTR_OZON_CITY = os.getenv("MS_ATTR_OZON_CITY")  # href атрибута "Город доставки"
+MS_ATTR_RECIPIENT_PHONE = os.getenv("MS_ATTR_RECIPIENT_PHONE")  # href атрибута "Телефон получателя"
+MS_ATTR_RECIPIENT_NAME = os.getenv("MS_ATTR_RECIPIENT_NAME")  # href атрибута "Имя получателя"
+MS_ATTR_POSTAMAT_ADDRESS = os.getenv("MS_ATTR_POSTAMAT_ADDRESS")  # href атрибута "Адрес ПВЗ/Постамат"
+MS_ATTR_TRACKING_NUMBER = os.getenv("MS_ATTR_TRACKING_NUMBER")  # href атрибута "Трек-номер"
+MS_ATTR_OZON_DISCOUNT = os.getenv("MS_ATTR_OZON_DISCOUNT")  # href атрибута "Скидка Ozon"
 
 BASE_URL = "https://api.moysklad.ru/api/remap/1.2"
-AUTH = (MS_LOGIN, MS_PASSWORD)
 
-session = requests.Session()
-session.auth = AUTH
-session.headers.update({
+# Базовая авторизация
+if not MS_LOGIN or not MS_PASSWORD:
+    raise RuntimeError("Не заданы MS_LOGIN / MS_PASSWORD в .env")
+
+auth_str = f"{MS_LOGIN}:{MS_PASSWORD}"
+auth_b64 = base64.b64encode(auth_str.encode("utf-8")).decode("utf-8")
+
+HEADERS = {
+    "Authorization": f"Basic {auth_b64}",
     "Content-Type": "application/json",
-    "Accept-Encoding": "gzip"
-})
+    "Accept-Encoding": "gzip",
+}
 
 
-# -------------------------------------------------
-# 🔎 Поиск товара / комплекта по артикулу
-# -------------------------------------------------
-def find_product_by_article(article: str):
-    if not article:
-        return None
+class MsClientError(Exception):
+    """Базовое исключение для ошибок работы с МойСклад."""
 
-    # 1) Ищем product
+
+class MsRateLimitError(MsClientError):
+    """Превышено ограничение на количество запросов."""
+
+
+def _handle_ms_error(resp: requests.Response, url: str) -> None:
+    """Общий разбор ошибок МойСклад."""
+    text = resp.text
     try:
-        url = f"{BASE_URL}/entity/product"
-        resp = session.get(url, params={"filter": f"article={article}", "limit": 1})
-        rows = resp.json().get("rows") or []
-        if rows:
-            return rows[0]
-    except Exception:
-        pass
-
-    # 2) Ищем bundle
-    try:
-        url = f"{BASE_URL}/entity/bundle"
-        resp = session.get(url, params={"filter": f"article={article}", "limit": 1})
-        rows = resp.json().get("rows") or []
-        if rows:
-            return rows[0]
-    except Exception:
-        pass
-
-    return None
-
-
-# -------------------------------------------------
-# 📦 Получение ассортимента по складу
-# -------------------------------------------------
-def get_assortment(store_id: str):
-    url = f"{BASE_URL}/report/stock/all"
-    params = {"store.id": store_id, "limit": 1000, "offset": 0}
-
-    all_rows = []
-    while True:
-        resp = session.get(url, params=params)
         data = resp.json()
-        rows = data.get("rows") or []
-        all_rows.extend(rows)
-
-        if len(rows) < 1000:
-            break
-
-        params["offset"] += 1000
-
-    return all_rows
-
-
-# -------------------------------------------------
-# 📦 Получение состава комплекта
-# -------------------------------------------------
-def get_bundle_components(bundle_meta_href: str):
-    try:
-        resp = session.get(f"{bundle_meta_href}/components")
-        data = resp.json()
-
-        result = []
-        for c in data.get("rows") or []:
-            if "assortment" in c and "meta" in c["assortment"]:
-                result.append({
-                    "meta": c["assortment"]["meta"],
-                    "quantity": c.get("quantity", 1)
-                })
-
-        return result
     except Exception:
-        return []
+        data = None
+
+    if resp.status_code == 429:
+        logger.error(
+            "[MS GET ERROR] %s status=%s body=%s", url, resp.status_code, text
+        )
+        raise MsRateLimitError(
+            f"МойСклад: Превышено ограничение на количество запросов "
+            f"(code=429, url={url})"
+        )
+
+    logger.error("[MS ERROR] %s status=%s body=%s", url, resp.status_code, text)
+    raise MsClientError(f"МойСклад вернул ошибку {resp.status_code} по url={url}")
 
 
-# =================================================
-# 🔥 --- ВОССТАНОВЛЕННЫЕ ФУНКЦИИ ДЛЯ sync_stock.py ---
-# =================================================
-
-def get_stock_all(store_id: str):
-    """
-    Возвращает словарь SKU → остаток.
-    Взято из ассортимента.
-    """
-    rows = get_assortment(store_id)
-
-    stock = {}
-    for r in rows:
-        article = r.get("article") or r.get("code")
-        if not article:
-            continue
-
-        stock[article] = {
-            "quantity": r.get("stock", 0),
-            "reserve": r.get("reserve", 0),
-            "free": (r.get("stock", 0) - r.get("reserve", 0)),
-            "meta": r.get("meta"),
-            "isBundle": r.get("meta", {}).get("type") == "bundle"
-        }
-
-    return stock
-
-
-def compute_bundle_available(bundle_meta_href: str, stock_dict: dict):
-    """
-    Корректный расчёт комплекта:
-    Остаток = min(остаток компонента / требуемое_количество)
-    """
-    components = get_bundle_components(bundle_meta_href)
-    if not components:
-        return 0
-
-    available_list = []
-
-    for comp in components:
-        meta = comp["meta"]
-        qty_needed = comp["quantity"]
-
-        comp_href = meta.get("href")
-        if not comp_href:
-            available_list.append(0)
-            continue
-
-        # находим строку в stock_dict по href
-        found_free = None
-        for art, row in stock_dict.items():
-            if row.get("meta", {}).get("href") == comp_href:
-                found_free = row["free"]
-                break
-
-        if found_free is None:
-            available_list.append(0)
-        else:
-            available_list.append(found_free // qty_needed)
-
-    return min(available_list) if available_list else 0
-
-
-# -------------------------------------------------
-# 📄 Создание заказа
-# -------------------------------------------------
-def create_customer_order(payload: dict):
-    resp = session.post(f"{BASE_URL}/entity/customerorder", json=payload)
-    resp.raise_for_status()
+def _ms_get(path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """GET-запрос к МойСклад (относительный путь)."""
+    url = f"{BASE_URL}{path}"
+    resp = requests.get(url, headers=HEADERS, params=params, timeout=30)
+    if resp.status_code >= 400:
+        _handle_ms_error(resp, url)
     return resp.json()
 
 
-# -------------------------------------------------
-# 🔍 Поиск заказа
-# -------------------------------------------------
-def find_customer_order_by_name(name: str):
-    resp = session.get(f"{BASE_URL}/entity/customerorder",
-                       params={"filter": f"name={name}", "limit": 1})
-    rows = resp.json().get("rows") or []
+def _ms_post(path: str, json: Dict[str, Any]) -> Dict[str, Any]:
+    """POST-запрос к МойСклад (относительный путь)."""
+    url = f"{BASE_URL}{path}"
+    resp = requests.post(url, headers=HEADERS, json=json, timeout=30)
+    if resp.status_code >= 400:
+        _handle_ms_error(resp, url)
+    return resp.json()
+
+
+def _ms_put(path: str, json: Dict[str, Any]) -> Dict[str, Any]:
+    """PUT-запрос к МойСклад (относительный путь)."""
+    url = f"{BASE_URL}{path}"
+    resp = requests.put(url, headers=HEADERS, json=json, timeout=30)
+    if resp.status_code >= 400:
+        _handle_ms_error(resp, url)
+    return resp.json()
+
+
+def _ms_get_by_href(href: str) -> Dict[str, Any]:
+    """GET по абсолютному href МойСклад."""
+    resp = requests.get(href, headers=HEADERS, timeout=30)
+    if resp.status_code >= 400:
+        _handle_ms_error(resp, href)
+    return resp.json()
+
+
+# ---------------------------------------------------------------------------
+# Ассортимент / товары / комплекты
+# ---------------------------------------------------------------------------
+
+
+def get_stock_all(
+    limit: int = 1000, offset: int = 0, store_id: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Возвращает отчёт по остаткам (report/stock/all) с постраничной выборкой.
+
+    :param limit: размер страницы
+    :param offset: смещение
+    :param store_id: id склада (UUID без /entity/store/)
+    """
+    params: Dict[str, Any] = {
+        "limit": limit,
+        "offset": offset,
+        "expand": "assortment",
+    }
+
+    if store_id:
+        params["stockStore"] = f"https://api.moysklad.ru/api/remap/1.2/entity/store/{store_id}"
+    elif MS_OZON_STORE_HREF:
+        params["stockStore"] = MS_OZON_STORE_HREF
+
+    url_path = "/report/stock/all"
+    url = f"{BASE_URL}{url_path}"
+    resp = requests.get(url, headers=HEADERS, params=params, timeout=30)
+    if resp.status_code >= 400:
+        _handle_ms_error(resp, url)
+    return resp.json()
+
+
+def get_assortment(
+    limit: int = 1000,
+    offset: int = 0,
+    filters: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
+    """
+    Возвращает список ассортимента /entity/assortment с фильтрами.
+    """
+    params: Dict[str, Any] = {"limit": limit, "offset": offset}
+    if filters:
+        filter_parts = [f"{k}={v}" for k, v in filters.items()]
+        params["filter"] = ";".join(filter_parts)
+
+    return _ms_get("/entity/assortment", params=params)
+
+
+def find_product_by_article(article: str) -> Optional[Dict[str, Any]]:
+    """
+    Ищет товар/услугу/комплект по артикулу (code).
+    Возвращает первую найденную позицию или None.
+    """
+    params = {
+        "filter": f"code={article}",
+        "limit": 1,
+    }
+    data = _ms_get("/entity/assortment", params=params)
+    rows = data.get("rows", [])
     return rows[0] if rows else None
 
 
-# -------------------------------------------------
-# 🔄 Обновление состояния заказа
-# -------------------------------------------------
-def update_customer_order_state(order_id: str, state_href: str):
+def get_bundle_components(bundle_href: str) -> List[Dict[str, Any]]:
+    """
+    Для комплекта (bundle) возвращает список компонент (positions).
+    """
+    bundle = _ms_get_by_href(bundle_href)
+    positions = bundle.get("components") or []
+    return positions
+
+
+def compute_bundle_available(bundle: Dict[str, Any], stock_by_href: Dict[str, int]) -> int:
+    """
+    Считает доступное количество комплекта исходя из остатков по его компонентам.
+
+    :param bundle: объект комплекта из отчёта/ассортимента
+    :param stock_by_href: словарь {href номенклатуры -> доступный остаток}
+    :return: максимальное целое количество комплекта
+    """
+    components = bundle.get("components") or []
+    if not components:
+        return 0
+
+    available_list: List[int] = []
+
+    for comp in components:
+        assortment = comp.get("assortment") or {}
+        comp_href = assortment.get("meta", {}).get("href")
+        if not comp_href:
+            continue
+
+        quantity = comp.get("quantity") or 1
+        total_stock = stock_by_href.get(comp_href, 0)
+
+        # сколько комплектов можно собрать по этой компоненте
+        if quantity <= 0:
+            continue
+        available_for_comp = total_stock // quantity
+        available_list.append(available_for_comp)
+
+    if not available_list:
+        return 0
+
+    return min(available_list)
+
+
+# ---------------------------------------------------------------------------
+# Работа с заказами покупателей
+# ---------------------------------------------------------------------------
+
+
+def create_customer_order(
+    name: str,
+    organization_href: str,
+    agent_href: str,
+    store_href: str,
+    project_href: Optional[str],
+    positions: List[Dict[str, Any]],
+    attributes: List[Dict[str, Any]],
+    state_href: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Создаёт заказ покупателя в МойСклад.
+    """
+    payload: Dict[str, Any] = {
+        "name": name,
+        "organization": {"meta": {"href": organization_href}},
+        "agent": {"meta": {"href": agent_href}},
+        "store": {"meta": {"href": store_href}},
+        "positions": positions,
+        "attributes": attributes,
+    }
+
+    if project_href:
+        payload["project"] = {"meta": {"href": project_href}}
+
+    if state_href:
+        payload["state"] = {"meta": {"href": state_href}}
+
+    logger.info(
+        "[MS] Создаём заказ покупателя name=%s, store=%s, project=%s",
+        name,
+        store_href,
+        project_href,
+    )
+
+    return _ms_post("/entity/customerorder", json=payload)
+
+
+def find_customer_order_by_name(name: str) -> Optional[Dict[str, Any]]:
+    """
+    Ищет заказ покупателя по имени (точное совпадение).
+    """
+    params = {
+        "filter": f"name={name}",
+        "limit": 1,
+    }
+    data = _ms_get("/entity/customerorder", params=params)
+    rows = data.get("rows", [])
+    return rows[0] if rows else None
+
+
+def update_customer_order_state(order: Dict[str, Any], state_href: str) -> Dict[str, Any]:
+    """
+    Обновляет статус (state) заказа покупателя.
+    """
+    order_href = order.get("meta", {}).get("href")
+    if not order_href:
+        raise MsClientError("У заказа нет meta.href")
+
     payload = {
         "state": {
             "meta": {
                 "href": state_href,
-                "type": "state",
-                "mediaType": "application/json"
             }
         }
     }
-    resp = session.put(f"{BASE_URL}/entity/customerorder/{order_id}", json=payload)
-    resp.raise_for_status()
-    return resp.json()
+
+    # order_href уже полный URL вида https://api.moysklad.ru/api/remap/1.2/entity/customerorder/...
+    return _ms_put(order_href.replace(BASE_URL, ""), json=payload)
 
 
-# -------------------------------------------------
-# ❗ Снятие резерва
-# -------------------------------------------------
-def clear_reserve_for_order(order_id: str):
-    resp = session.put(
-        f"{BASE_URL}/entity/customerorder/{order_id}",
-        json={"reservedSum": 0}
-    )
-    resp.raise_for_status()
-    return resp.json()
-
-
-# -------------------------------------------------
-# 🚚 Создание отгрузки createDemand
-# -------------------------------------------------
-def create_demand_from_order(order_obj: dict):
-    meta = order_obj.get("meta")
-    if not meta:
-        raise ValueError("order_obj.meta отсутствует")
-
-    order_href = meta.get("href")
+def clear_reserve_for_order(order: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Сбрасывает резерв по заказу (reservedSum = 0).
+    """
+    order_href = order.get("meta", {}).get("href")
     if not order_href:
-        raise ValueError("order.meta.href отсутствует")
+        raise MsClientError("У заказа нет meta.href")
 
-    url = f"{order_href}/createDemand"
-    resp = session.post(url)
-    resp.raise_for_status()
-    return resp.json()
+    payload = {
+        "reservedSum": 0,
+    }
+
+    return _ms_put(order_href.replace(BASE_URL, ""), json=payload)
+
+
+def create_demand_from_order(order: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Создаёт отгрузку (demand) на основании заказа покупателя.
+
+    Логика:
+      1. Берём заказ (organization, agent, store, project, attributes, positions).
+      2. Формируем payload для /entity/demand.
+      3. Отправляем POST.
+    """
+    order_href = order.get("meta", {}).get("href")
+    if not order_href:
+        raise MsClientError("У заказа нет meta.href")
+
+    org = order.get("organization") or {}
+    agent = order.get("agent") or {}
+    store = order.get("store") or {}
+    project = order.get("project")
+    attributes = order.get("attributes") or []
+    positions = order.get("positions") or []
+
+    demand_payload: Dict[str, Any] = {
+        "organization": org,
+        "agent": agent,
+        "store": store,
+        "customerOrder": {"meta": {"href": order_href}},
+        "attributes": attributes,
+        "positions": [],
+    }
+
+    if project:
+        demand_payload["project"] = project
+
+    # Копируем позиции из заказа
+    for pos in positions:
+        assortment = pos.get("assortment") or {}
+        quantity = pos.get("quantity") or 0
+        price = pos.get("price") or 0
+
+        demand_payload["positions"].append(
+            {
+                "assortment": assortment,
+                "quantity": quantity,
+                "price": price,
+            }
+        )
+
+    logger.info(
+        "[MS] Создаём отгрузку из заказа id=%s name=%s",
+        order.get("id"),
+        order.get("name"),
+    )
+
+    # /entity/demand — стандартная точка создания отгрузки
+    return _ms_post("/entity/demand", json=demand_payload)
