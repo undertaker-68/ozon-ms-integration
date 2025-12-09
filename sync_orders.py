@@ -259,7 +259,7 @@ def process_posting(posting: dict, dry_run: bool) -> None:
         return
 
     # Проверяем, есть ли уже такой заказ
-    existing = find_customer_order_by_name(order_name)
+        existing = find_customer_order_by_name(order_name)
     if existing:
         print(f"[ORDERS] Заказ {order_name} уже существует в МойСклад.")
         if state_meta_href:
@@ -267,20 +267,10 @@ def process_posting(posting: dict, dry_run: bool) -> None:
 
         # При delivering/delivered создаём отгрузку и для существующего заказа
         if status in ("delivering", "delivered"):
-            try:
-                # БЫЛО: create_demand_from_order(existing["meta"]["href"])
-                create_demand_from_order(existing)
-            except Exception as e:
-                msg = (
-                    f"[ORDERS] Ошибка создания отгрузки для существующего заказа "
-                    f"{order_name}: {e!r}"
-                )
-                print(msg)
-                try:
-                    send_telegram_message(msg)
-                except Exception:
-                    pass
-                raise
+            # БЫЛО: create_demand_from_order(existing["meta"]["href"])
+            # Ошибки пробрасываем наверх, чтобы они попали в CSV, но без отдельного сообщения в Телеграм
+            create_demand_from_order(existing)
+            
         return
 
         # Создаём новый заказ
