@@ -156,19 +156,17 @@ def process_posting(posting: dict, dry_run: bool) -> None:
     """
     Обработка одного FBS-отправления (оба кабинета):
       - создаём/обновляем заказ в МойСклад
-      - в комментарий заказа пишем:
-          'FBS → Auto-MiX' для первого кабинета
-          'FBS → Trail Gear' для второго кабинета
-      - при статусах delivering/delivered создаём отгрузку
+      - проставляем статус в МойСклад по статусу Ozon
+      - для delivering/delivered создаём отгрузку
     """
     posting_number = posting.get("posting_number")
     status = posting.get("status")
     ozon_account = posting.get("_ozon_account") or "ozon1"
 
-    # Номер заказа в МС = номеру в Ozon (БЕЗ префиксов)
+    # Номер заказа в МС = номеру отправления Ozon
     order_name = posting_number or "UNKNOWN"
 
-   # Позиции заказа
+    # --- Формируем позиции заказа с ценой из МойСклад ---
     items = posting.get("products") or []
     ms_positions: list[dict] = []
 
@@ -182,12 +180,12 @@ def process_posting(posting: dict, dry_run: bool) -> None:
         if not product:
             raise ValueError(f"Товар с артикулом {offer_id!r} не найден в МойСклад")
 
-        # Берём базовую цену продажи из МойСклад
+        # Базовая цена продажи из МойСклад (salePrices[0].value, в копейках)
         price = None
         sale_prices = product.get("salePrices")
         if isinstance(sale_prices, list) and sale_prices:
             first_price = sale_prices[0] or {}
-            price = first_price.get("value")  # в копейках
+            price = first_price.get("value")
 
         ms_positions.append(
             {
@@ -196,21 +194,22 @@ def process_posting(posting: dict, dry_run: bool) -> None:
                 "price": price,
             }
         )
-        
+
     if not ms_positions:
         raise ValueError("Не удалось добавить ни одной позиции с товарами МойСклад")
 
     positions_payload: list[dict] = []
-for pos in ms_positions:
-    item_payload = {
-        "quantity": pos["quantity"],
-        "assortment": {"meta": pos["ms_meta"]},
-    }
-    # Если цена есть – добавляем в позицию
-    if pos.get("price") is not None:
-        item_payload["price"] = pos["price"]
-    positions_payload.append(item_payload)
+    for pos in ms_positions:
+        item_payload = {
+            "quantity": pos["quantity"],
+            "assortment": {"meta": pos["ms_meta"]},
+        }
+        # Если цена есть – добавляем в позицию
+        if pos.get("price") is not None:
+            item_payload["price"] = pos["price"]
+        positions_payload.append(item_payload)
 
+    # --- Мета-данные организации, контрагента и склада ---
     org_meta = {
         "href": MS_ORGANIZATION_HREF,
         "type": "organization",
@@ -227,7 +226,7 @@ for pos in ms_positions:
         "mediaType": "application/json",
     }
 
-    # Комментарий и канал продаж
+    # --- Комментарий и канал продаж по кабинету ---
     if ozon_account in ("ozon2", "trail_gear"):
         description = "FBS → Trail Gear"
         sales_channel_meta = SALES_CHANNEL_TRAIL_META
@@ -245,6 +244,7 @@ for pos in ms_positions:
         "salesChannel": {"meta": sales_channel_meta},
     }
 
+    # --- Статус заказа в МойСклад по статусу отправления Ozon ---
     state_meta_href = _ms_get_state_meta_href(status)
     if state_meta_href:
         payload["state"] = {
