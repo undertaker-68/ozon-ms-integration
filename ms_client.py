@@ -350,6 +350,19 @@ def find_customer_order_by_name(name: str) -> dict | None:
     rows = data.get("rows") or []
     return rows[0] if rows else None
 
+def find_demand_by_name(name: str) -> dict | None:
+    """
+    Ищем отгрузку (demand) по имени.
+    Используем, чтобы не создавать дубликаты отгрузок.
+    """
+    url = f"{BASE_URL}/entity/demand"
+    params = {
+        "filter": f"name={name}",
+        "limit": 1,
+    }
+    data = _ms_get(url, params)
+    rows = data.get("rows") or []
+    return rows[0] if rows else None
 
 def update_customer_order_state(order_href: str, state_href: str) -> None:
     payload = {
