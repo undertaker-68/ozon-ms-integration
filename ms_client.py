@@ -376,6 +376,7 @@ def create_demand_from_order(order: dict) -> dict:
     """
     Создать отгрузку (demand) на основании заказа покупателя
     БЕЗ /entity/demand/new — сразу POST /entity/demand.
+    Берём те же позиции и цены, что и в заказе.
     """
     order_meta = order.get("meta") or {}
     order_href = order_meta.get("href")
@@ -387,6 +388,7 @@ def create_demand_from_order(order: dict) -> dict:
         order = _ms_get_by_href(order_href)
 
     # Корректно получаем список позиций (через /customerorder/<id>/positions)
+    # _get_order_positions должен вернуть список строк с quantity, assortment, price
     positions = _get_order_positions(order)
 
     demand_payload = {
@@ -398,12 +400,14 @@ def create_demand_from_order(order: dict) -> dict:
             {
                 "quantity": pos.get("quantity", 0),
                 "assortment": pos.get("assortment"),
+                # КЛЮЧЕВОЕ: цена из позиции заказа (в копейках)
+                "price": pos.get("price", 0),
             }
             for pos in positions
         ],
     }
 
-    # Название отгрузки = номер заказа (имя заказа в МС = номер отправления Ozon)
+    # Имя отгрузки = номер заказа (номер отправления Ozon)
     demand_name = order.get("name")
     if demand_name:
         demand_payload["name"] = demand_name
