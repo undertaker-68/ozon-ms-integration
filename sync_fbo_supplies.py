@@ -1,4 +1,5 @@
 import os
+import json
 from datetime import datetime, timedelta, timezone
 
 import requests
@@ -47,10 +48,8 @@ MS_STATE_FBO_HREF = os.getenv("MS_STATE_FBO_HREF")
 # Статус отгрузки для FBO (опционально)
 MS_FBO_DEMAND_STATE_HREF = os.getenv("MS_FBO_DEMAND_STATE_HREF")
 
-
 if not MS_ORGANIZATION_HREF or not MS_FBO_AGENT_HREF or not MS_FBO_STORE_HREF:
     raise RuntimeError("Не заданы MS_ORGANIZATION_HREF / MS_AGENT_HREF / MS_STORE_HREF в .env")
-
 
 # Состояния поставок Ozon, при которых создаём Отгрузку в МС
 DEMAND_CREATE_SUPPLY_STATES = {
@@ -58,11 +57,13 @@ DEMAND_CREATE_SUPPLY_STATES = {
     "ACCEPTANCE_AT_STORAGE_WAREHOUSE",
 }
 
+# Файл состояния для FBO (чтобы не трогать старые поставки)
+FBO_STATE_FILE = "fbo_state.json"
+
 
 # ==========================
-# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ: ДАТЫ
 # ==========================
-
 
 def _parse_ozon_datetime(dt_str: str | None) -> datetime | None:
     if not dt_str:
@@ -85,7 +86,6 @@ def _to_ms_moment(dt: datetime | None) -> str | None:
     if not dt:
         return None
     # В МС формат: "YYYY-MM-DD HH:MM:SS"
-    # Используем UTC, чтобы не городить таймзоны
     dt_utc = dt.astimezone(timezone.utc)
     return dt_utc.strftime("%Y-%m-%d %H:%M:%S")
 
@@ -96,6 +96,62 @@ def _build_ms_meta(href: str, type_: str) -> dict:
         "type": type_,
         "mediaType": "application/json",
     }
+
+
+# ==========================
+# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ: СОСТОЯНИЕ FBO
+# ==========================
+
+def _load_fbo_state() -> dict | None:
+    """
+    Загружаем состояние FBO (известные заявки на поставку).
+    Формат:
+    {
+      "version": 1,
+      "accounts": {
+        "ozon1": [123, 456, ...],
+        "ozon2": [789, ...]
+      }
+    }
+    """
+    if not os.path.exists(FBO_STATE_FILE):
+        return None
+
+    try:
+        with open(FBO_STATE_FILE, "r", encoding="utf-8") as f:
+            state = json.load(f)
+    except Exception as e:  # noqa: BLE001
+        print(f"[FBO] Не удалось прочитать {FBO_STATE_FILE}: {e!r}")
+        return None
+
+    if not isinstance(state, dict):
+        return None
+
+    state.setdefault("version", 1)
+    state.setdefault("accounts", {})
+    if not isinstance(state["accounts"], dict):
+        state["accounts"] = {}
+
+    # Нормализуем структуры аккаунтов
+    for acc in ("ozon1", "ozon2"):
+        ids = state["accounts"].get(acc)
+        if not isinstance(ids, list):
+            state["accounts"][acc] = []
+        else:
+            # только int
+            state["accounts"][acc] = [
+                int(x) for x in ids if isinstance(x, int) or (isinstance(x, str) and x.isdigit())
+            ]
+
+    return state
+
+
+def _save_fbo_state(state: dict) -> None:
+    try:
+        with open(FBO_STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+    except Exception as e:  # noqa: BLE001
+        print(f"[FBO] Не удалось записать {FBO_STATE_FILE}: {e!r}")
 
 
 def _has_demand_for_order(order_href: str) -> bool:
@@ -163,7 +219,7 @@ def _collect_positions_from_supply(order: dict, client: OzonFboClient) -> tuple[
     """
     Собираем состав поставки (товары) по всем bundle_id в заявке.
     Возвращает:
-      - список позиций для МойСклад (ещё без меты и цен)
+      - список позиций для МойСклад
       - список текстовых ошибок по товарам
     """
     supplies = order.get("supplies") or []
@@ -183,7 +239,6 @@ def _collect_positions_from_supply(order: dict, client: OzonFboClient) -> tuple[
         for item in items:
             offer = (item.get("contractor_item_code") or "").strip()
             if not offer:
-                # запасной вариант — SKU как артикул
                 sku = item.get("sku")
                 if sku is not None:
                     offer = str(sku)
@@ -248,7 +303,6 @@ def _process_single_fbo_order(order: dict, client: OzonFboClient, dry_run: bool)
         str((s or {}).get("supply_state") or "").upper()
         for s in supplies
     }
-    # Может пригодиться и общий state заявки
     order_state = (order.get("state") or "").upper()
 
     # Склад назначения и "кластер" для комментария
@@ -261,7 +315,6 @@ def _process_single_fbo_order(order: dict, client: OzonFboClient, dry_run: bool)
     # Дата поставки → плановая дата отгрузки
     arrival_raw = storage_wh.get("arrival_date") or first_supply.get("arrival_date")
     if not arrival_raw:
-        # запасной вариант: timeslot.from или дата создания заявки
         timeslot = first_supply.get("timeslot") or {}
         arrival_raw = timeslot.get("from") or order.get("creation_date") or order.get("created_date")
 
@@ -280,7 +333,6 @@ def _process_single_fbo_order(order: dict, client: OzonFboClient, dry_run: bool)
     raw_positions, pos_errors = _collect_positions_from_supply(order, client)
 
     if not raw_positions and pos_errors:
-        # Если ни одной позиции не удалось сопоставить — считаем ошибкой и выходим
         msg = f"По FBO-поставке {order_number} не удалось подобрать ни одной позиции МС."
         print("[FBO] " + msg)
         text = f"❗ {msg}\n" + "\n".join(pos_errors[:10])
@@ -304,7 +356,6 @@ def _process_single_fbo_order(order: dict, client: OzonFboClient, dry_run: bool)
     agent_meta = _build_ms_meta(MS_FBO_AGENT_HREF, "counterparty")
     store_meta = _build_ms_meta(MS_FBO_STORE_HREF, "store")
 
-    # Полезно понимать, сколько позиций и их суммарное кол-во
     total_qty = sum(p.get("quantity", 0) for p in positions_payload)
 
     print(
@@ -314,10 +365,8 @@ def _process_single_fbo_order(order: dict, client: OzonFboClient, dry_run: bool)
         f"позиций: {len(positions_payload)}, всего штук: {total_qty}, DRY_RUN={dry_run}"
     )
 
-    # Имя заказа в МС = номеру поставки
     order_name = order_number
 
-    # Формируем базовый payload для МС
     payload: dict = {
         "name": order_name,
         "organization": {"meta": org_meta},
@@ -341,9 +390,8 @@ def _process_single_fbo_order(order: dict, client: OzonFboClient, dry_run: bool)
 
     existing = find_customer_order_by_name(order_name)
 
-    # Определяем, нужно ли создавать или обновлять заказ
     if existing:
-        # --- Обновление существующего заказа ---
+        # обновляем
         order_href = existing["meta"]["href"]
 
         old_planned = existing.get("shipmentPlannedMoment") or existing.get("deliveryPlannedMoment")
@@ -351,7 +399,6 @@ def _process_single_fbo_order(order: dict, client: OzonFboClient, dry_run: bool)
         old_positions_meta = (existing.get("positions") or {}).get("meta") or {}
         old_positions_count = old_positions_meta.get("size")
 
-        # Для обновления не трогаем name/agent/store/organization
         update_payload: dict = {
             "positions": positions_payload,
             "description": comment,
@@ -365,7 +412,6 @@ def _process_single_fbo_order(order: dict, client: OzonFboClient, dry_run: bool)
 
         update_customer_order(order_href, update_payload)
 
-        # Готовим описание изменений для Telegram
         changes: list[str] = []
 
         if planned_moment and planned_moment != old_planned:
@@ -394,7 +440,7 @@ def _process_single_fbo_order(order: dict, client: OzonFboClient, dry_run: bool)
         ms_order = existing
         ms_order_href = order_href
     else:
-        # --- Создание нового заказа ---
+        # создаём
         ms_order = create_customer_order(payload)
         ms_order_href = ms_order["meta"]["href"]
 
@@ -429,7 +475,6 @@ def _process_single_fbo_order(order: dict, client: OzonFboClient, dry_run: bool)
             except Exception:
                 pass
     else:
-        # Для отладки логируем, что отгрузку не создаём
         print(
             f"[FBO] Для заказа {order_name} отгрузка не создаётся: "
             f"supply_states={supply_states}, "
@@ -437,10 +482,15 @@ def _process_single_fbo_order(order: dict, client: OzonFboClient, dry_run: bool)
         )
 
 
+# ==========================
+# ОСНОВНАЯ ФУНКЦИЯ
+# ==========================
+
 def sync_fbo_supplies(limit: int = 50, days_back: int = 30, dry_run: bool | None = None) -> None:
     """
     Основная функция синхронизации FBO-поставок в МойСклад.
-    Работает по двум кабинетам Ozon (если указаны креды второго).
+    ВАЖНО: поставки, которые уже были в ЛК Ozon до первого запуска скрипта,
+           НЕ обрабатываются (фиксируются в state и игнорируются).
     """
     if dry_run is None:
         dry_run = DRY_RUN_FBO
@@ -466,29 +516,62 @@ def sync_fbo_supplies(limit: int = 50, days_back: int = 30, dry_run: bool | None
         print("[FBO] Нет доступных кабинетов Ozon для синхронизации.")
         return
 
+    # --- Работаем с состоянием ---
+    state = _load_fbo_state()
+    first_run = state is None
+
+    if state is None:
+        state = {"version": 1, "accounts": {}}
+    accounts_state: dict = state.setdefault("accounts", {})
+
     for client in clients:
+        acc = client.account_name
+        known_ids: list[int] = accounts_state.get(acc) or []
+        accounts_state[acc] = known_ids
+
         try:
             orders = client.get_supply_orders(limit=limit, days_back=days_back)
         except Exception as e:  # noqa: BLE001
-            print(f"[FBO] Ошибка получения заявок по кабинету {client.account_name}: {e!r}")
+            print(f"[FBO] Ошибка получения заявок по кабинету {acc}: {e!r}")
             continue
 
         print(
-            f"[FBO] Кабинет {client.account_name}: получено заявок на поставку: "
+            f"[FBO] Кабинет {acc}: получено заявок на поставку: "
             f"{len(orders)}"
         )
 
+        if first_run and not dry_run:
+            # ПЕРВЫЙ ЗАПУСК: ничего не делаем, только запоминаем существующие заявки
+            for order in orders:
+                oid = order.get("_order_id")
+                if isinstance(oid, int) and oid not in known_ids:
+                    known_ids.append(oid)
+            print(
+                f"[FBO] Первый запуск: для кабинета {acc} добавлено "
+                f"{len(orders)} заявок в список известных, без создания документов."
+            )
+            continue
+
+        # Обычный запуск: обрабатываем только новые заявки
         for order in orders:
-            try:
-                _process_single_fbo_order(order, client, dry_run=dry_run)
-            except Exception as e:  # noqa: BLE001
-                print(
-                    f"[FBO] Ошибка обработки заявки "
-                    f"{order.get('supply_order_number') or order.get('_order_id')} "
-                    f"({client.account_name}): {e!r}"
-                )
+            oid = order.get("_order_id")
+            if not isinstance(oid, int):
+                continue
+
+            if oid in known_ids:
+                # это старая заявка, пропускаем
+                continue
+
+            # новая заявка
+            _process_single_fbo_order(order, client, dry_run=dry_run)
+
+            if not dry_run:
+                known_ids.append(oid)
+
+    # Сохраняем состояние только если не DRY_RUN
+    if not dry_run:
+        _save_fbo_state(state)
 
 
 if __name__ == "__main__":
-    # значения по умолчанию можно при желании вынести в .env
     sync_fbo_supplies(limit=50, days_back=30, dry_run=DRY_RUN_FBO)
