@@ -80,6 +80,36 @@ def _ms_get_by_href(href: str) -> dict:
 # КОМПЛЕКТЫ (BUNDLE)
 # ==========================
 
+def _get_order_positions(order: dict) -> list[dict]:
+    """
+    Возвращает список позиций заказа покупателя.
+
+    В ответе МойСклад по заказу обычно:
+      "positions": { "meta": { "href": ".../customerorder/<id>/positions", ... } }
+
+    Поэтому:
+      - если positions = dict с meta.href → ходим по href и берём rows;
+      - если positions уже список → используем как есть.
+    """
+    positions = order.get("positions") or []
+
+    # Случай 1: positions — это словарь с meta.href
+    if isinstance(positions, dict):
+        meta = positions.get("meta") or {}
+        href = meta.get("href")
+        if href:
+            data = _ms_get_by_href(href)
+            rows = data.get("rows") or []
+            if isinstance(rows, list):
+                return rows
+        return []
+
+    # Случай 2: positions уже список
+    if isinstance(positions, list):
+        return positions
+
+    return []
+
 def _get_bundle_components(bundle_row: dict) -> list[dict]:
     """
     Получаем реальные компоненты комплекта.
@@ -344,42 +374,39 @@ def clear_reserve_for_order(order_href: str) -> None:
 
 def create_demand_from_order(order: dict) -> dict:
     """
-    Создать отгрузку (demand) на основании заказа покупателя.
-
-    Работает и для только что созданного заказа (created),
-    и для уже существующего (existing).
+    Создать отгрузку (demand) на основании заказа покупателя
+    БЕЗ /entity/demand/new — сразу POST /entity/demand.
     """
     order_meta = order.get("meta") or {}
     order_href = order_meta.get("href")
     if not order_href:
         raise ValueError("У заказа нет meta.href, не можем создать отгрузку")
 
-    # 1) Получаем черновик отгрузки от МойСклад
-    #    /entity/demand/new сам подставит organization, agent, store, позиции и т.п.
-    url_new = f"{BASE_URL}/entity/demand/new"
-    params = {"customerOrder": order_href}
-    draft = _ms_get(url_new, params)
+    # Если в объекте заказа нет позиций — добираем полный заказ по href
+    if not order.get("positions"):
+        order = _ms_get_by_href(order_href)
 
-    # 2) Аккуратно нормализуем позиции (бывает, что в черновике формат разный)
-    positions = draft.get("positions") or []
-    fixed_positions: list[dict] = []
-    for pos in positions:
-        if not isinstance(pos, dict):
-            continue
-        fixed_positions.append(
+    # Корректно получаем список позиций (через /customerorder/<id>/positions)
+    positions = _get_order_positions(order)
+
+    demand_payload = {
+        "customerOrder": {"meta": order["meta"]},
+        "organization": order["organization"],
+        "agent": order["agent"],
+        "store": order["store"],
+        "positions": [
             {
                 "quantity": pos.get("quantity", 0),
                 "assortment": pos.get("assortment"),
             }
-        )
-    draft["positions"] = fixed_positions
+            for pos in positions
+        ],
+    }
 
-    # 3) Имя отгрузки = имя заказа (номер отправления),
-    #    чтобы тебе было удобно сверять
+    # Название отгрузки = номер заказа (имя заказа в МС = номер отправления Ozon)
     demand_name = order.get("name")
     if demand_name:
-        draft["name"] = demand_name
+        demand_payload["name"] = demand_name
 
-    # 4) Создаём отгрузку
     url = f"{BASE_URL}/entity/demand"
-    return _ms_post(url, draft)
+    return _ms_post(url, demand_payload)
