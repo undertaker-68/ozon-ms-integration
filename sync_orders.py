@@ -157,7 +157,7 @@ def process_posting(posting: dict, dry_run: bool) -> None:
     Обработка одного FBS-отправления (оба кабинета):
       - создаём/обновляем заказ в МойСклад
       - проставляем статус в МойСклад по статусу Ozon
-      - для delivering/delivered создаём отгрузку
+      - для delivering/delivered создаём отгрузку (не более 1 раза)
     """
     posting_number = posting.get("posting_number")
     status = posting.get("status")
@@ -180,7 +180,7 @@ def process_posting(posting: dict, dry_run: bool) -> None:
         if not product:
             raise ValueError(f"Товар с артикулом {offer_id!r} не найден в МойСклад")
 
-        # Базовая цена продажи из МойСклад (salePrices[0].value, в копейках)
+        # Базовая цена продажи из МойСклад (salePrices[0].value)
         price = None
         sale_prices = product.get("salePrices")
         if isinstance(sale_prices, list) and sale_prices:
@@ -204,7 +204,6 @@ def process_posting(posting: dict, dry_run: bool) -> None:
             "quantity": pos["quantity"],
             "assortment": {"meta": pos["ms_meta"]},
         }
-        # Если цена есть – добавляем в позицию
         if pos.get("price") is not None:
             item_payload["price"] = pos["price"]
         positions_payload.append(item_payload)
@@ -264,27 +263,28 @@ def process_posting(posting: dict, dry_run: bool) -> None:
     if dry_run:
         return
 
-    # --- дальше логика без путаницы с existing ---
-
     existing = find_customer_order_by_name(order_name)
 
     # Если заказ уже есть
     if existing:
-        print(f"[ORDERS] Заказ {order_name} уже существует в МойСклад.")
         if state_meta_href:
             update_customer_order_state(existing["meta"]["href"], state_meta_href)
 
-        # Для delivering/delivered делаем отгрузку
+        # Создаём отгрузку, только если её НЕТ
         if status in ("delivering", "delivered"):
-            create_demand_from_order(existing)
+            existing_demand = find_demand_by_name(order_name)
+            if not existing_demand:
+                create_demand_from_order(existing)
         return
 
     # Если заказа ещё нет — создаём
     created = create_customer_order(payload)
 
-    # И сразу делаем отгрузку, если статус уже delivering/delivered
+    # Если статус уже delivering/delivered — создаём отгрузку, но только если её НЕТ
     if status in ("delivering", "delivered"):
-        create_demand_from_order(created)
+        existing_demand = find_demand_by_name(order_name)
+        if not existing_demand:
+            create_demand_from_order(created)
 
 async def _sync_for_account(
     ozon_account: str,
