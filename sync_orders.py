@@ -52,9 +52,11 @@ MS_ORGANIZATION_HREF = os.getenv("MS_ORGANIZATION_HREF")
 MS_STORE_HREF = os.getenv("MS_STORE_HREF")
 MS_AGENT_HREF = os.getenv("MS_AGENT_HREF")
 
-MS_STATE_NEW_HREF = os.getenv("MS_STATE_NEW_HREF")  # состояние "Новый"
-MS_STATE_IN_PROGRESS_HREF = os.getenv("MS_STATE_IN_PROGRESS_HREF")
-MS_STATE_DONE_HREF = os.getenv("MS_STATE_DONE_HREF")
+MS_STATE_AWAIT_PACK = os.getenv("MS_STATE_AWAIT_PACK")
+MS_STATE_AWAIT_SHIP = os.getenv("MS_STATE_AWAIT_SHIP")
+MS_STATE_DELIVERING = os.getenv("MS_STATE_DELIVERING")
+MS_STATE_DELIVERED = os.getenv("MS_STATE_DELIVERED")
+MS_STATE_CANCELLED = os.getenv("MS_STATE_CANCELLED")
 
 OZON2_ENABLED = os.getenv("ENABLE_OZON2_ORDERS", "true").lower() == "true"
 
@@ -134,17 +136,21 @@ def _send_telegram_error(ozon_account: str, posting_number: str, text: str) -> N
     print(msg)
     # Телеграм здесь специально отключен, чтобы не спамить чат
 
-
 def _ms_get_state_meta_href(status: str) -> str | None:
     """
-    Возвращает meta.href состояния заказа МойСклад по статусу отправления Ozon.
+    Маппинг статуса Ozon → состояние заказа в МойСклад.
+    Берём href'ы из .env:
+      MS_STATE_AWAIT_PACK, MS_STATE_AWAIT_SHIP, MS_STATE_DELIVERING,
+      MS_STATE_DELIVERED, MS_STATE_CANCELLED
     """
-    if status in ("awaiting_packaging", "awaiting_deliver"):
-        return MS_STATE_NEW_HREF or MS_STATE_IN_PROGRESS_HREF
-    if status == "delivered":
-        return MS_STATE_DONE_HREF
-    return None
-
+    status_map = {
+        "awaiting_packaging": MS_STATE_AWAIT_PACK,
+        "awaiting_deliver": MS_STATE_AWAIT_SHIP,
+        "delivering": MS_STATE_DELIVERING,
+        "delivered": MS_STATE_DELIVERED,
+        "cancelled": MS_STATE_CANCELLED,
+    }
+    return status_map.get(status)
 
 def process_posting(posting: dict, dry_run: bool) -> None:
     """
@@ -162,7 +168,7 @@ def process_posting(posting: dict, dry_run: bool) -> None:
     # Номер заказа в МС = номеру в Ozon (БЕЗ префиксов)
     order_name = posting_number or "UNKNOWN"
 
-    # Позиции заказа
+   # Позиции заказа
     items = posting.get("products") or []
     ms_positions: list[dict] = []
 
@@ -176,23 +182,34 @@ def process_posting(posting: dict, dry_run: bool) -> None:
         if not product:
             raise ValueError(f"Товар с артикулом {offer_id!r} не найден в МойСклад")
 
+        # Берём базовую цену продажи из МойСклад
+        price = None
+        sale_prices = product.get("salePrices")
+        if isinstance(sale_prices, list) and sale_prices:
+            first_price = sale_prices[0] or {}
+            price = first_price.get("value")  # в копейках
+
         ms_positions.append(
             {
                 "ms_meta": product["meta"],
                 "quantity": quantity,
+                "price": price,
             }
         )
-
+        
     if not ms_positions:
         raise ValueError("Не удалось добавить ни одной позиции с товарами МойСклад")
 
-    positions_payload = [
-        {
-            "quantity": pos["quantity"],
-            "assortment": {"meta": pos["ms_meta"]},
-        }
-        for pos in ms_positions
-    ]
+    positions_payload: list[dict] = []
+for pos in ms_positions:
+    item_payload = {
+        "quantity": pos["quantity"],
+        "assortment": {"meta": pos["ms_meta"]},
+    }
+    # Если цена есть – добавляем в позицию
+    if pos.get("price") is not None:
+        item_payload["price"] = pos["price"]
+    positions_payload.append(item_payload)
 
     org_meta = {
         "href": MS_ORGANIZATION_HREF,
