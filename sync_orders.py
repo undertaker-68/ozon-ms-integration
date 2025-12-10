@@ -9,6 +9,7 @@ from ms_client import (
     find_product_by_article,
     create_customer_order,
     find_customer_order_by_name,
+    find_demand_by_name,
     update_customer_order_state,
     clear_reserve_for_order,
     create_demand_from_order,
