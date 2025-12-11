@@ -22,9 +22,9 @@ class OzonFboClient:
     Мини-клиент только под FBO-поставки.
 
     Использует:
-      * /v3/supply-order/list — список заявок на поставку (ID-шники)
+      * /v3/supply-order/list — список заявок на поставку (order_ids)
       * /v3/supply-order/get  — детали заявок по списку order_ids
-      * /v1/supply-order/bundle — состав поставки (товары) по bundle_id
+      * /v1/supply-order/bundle — состав поставки по bundle_id
     """
 
     def __init__(self, client_id: str, api_key: str, account_name: str = "ozon1") -> None:
@@ -96,18 +96,10 @@ class OzonFboClient:
         """
         Получить ID заявок на поставку FBO за последние N дней.
 
-        /v3/supply-order/list:
-        body:
-        {
-          "filter": {
-            "states": [...],
-            "from": "...",
-            "to": "..."
-          },
-          "limit": 50,
-          "sort_by": "ORDER_CREATION",
-          "sort_dir": "DESC"
-        }
+        Твой кабинет принимает:
+          - обязательное поле filter.states (минимум 1 состояние)
+          - sort_by="ORDER_CREATION"
+          - sort_dir="ASC"
         """
         if limit <= 0:
             return []
@@ -115,16 +107,16 @@ class OzonFboClient:
         now = datetime.now(timezone.utc)
         since = now - timedelta(days=days_back)
 
+        # Нормальный набор состояний для работы
         if states is None:
             states = [
-                "DATA_FILLING",
+                "CREATED",
+                "ACCEPTED",
                 "READY_TO_SUPPLY",
-                "ACCEPTED_AT_SUPPLY_WAREHOUSE",
+                "RESERVED",
                 "IN_TRANSIT",
                 "ACCEPTANCE_AT_STORAGE_WAREHOUSE",
-                "REPORTS_CONFIRMATION_AWAITING",
-                "REPORT_REJECTED",
-                "COMPLETED",
+                "FINISHED",
             ]
 
         body = {
@@ -135,7 +127,7 @@ class OzonFboClient:
             },
             "limit": min(limit, 50),
             "sort_by": "ORDER_CREATION",
-            "sort_dir": "DESC",
+            "sort_dir": "ASC",
         }
 
         print(
@@ -144,7 +136,6 @@ class OzonFboClient:
         )
         data = self._post("/v3/supply-order/list", body)
 
-        # В документации поле называется order_ids
         order_ids = data.get("order_ids") or []
         if not isinstance(order_ids, list):
             print(
@@ -157,10 +148,14 @@ class OzonFboClient:
             f"[OZON FBO] Получено заявок на поставку (IDs) ({self.account_name}): "
             f"{len(order_ids)}"
         )
-        return [int(oid) for oid in order_ids if isinstance(oid, int) or (isinstance(oid, str) and oid.isdigit())]
+        return [
+            int(oid)
+            for oid in order_ids
+            if isinstance(oid, int) or (isinstance(oid, str) and oid.isdigit())
+        ]
 
     # --------------------------
-    # FBO: ДЕТАЛИ ЗАЯВОК (БАТЧЕМ)
+    # FBO: ДЕТАЛИ ЗАЯВОК
     # --------------------------
 
     def get_supply_orders(
@@ -172,16 +167,9 @@ class OzonFboClient:
         """
         Получить список детальных заявок на поставку.
 
-        /v3/supply-order/get:
-        body:
+        В твоём кабинете ответ /v3/supply-order/get выглядит так:
         {
-          "order_ids": [ ... ]
-        }
-        ответ:
-        {
-          "result": {
-            "orders": [ ... ]
-          }
+          "orders": [ {...}, {...} ]
         }
         """
         order_ids = self.list_supply_order_ids(limit=limit, days_back=days_back, states=states)
@@ -190,7 +178,6 @@ class OzonFboClient:
 
         result: list[dict] = []
 
-        # Ozon требует 1..50 ID за раз
         chunk_size = 50
         for i in range(0, len(order_ids), chunk_size):
             chunk = order_ids[i : i + chunk_size]
@@ -202,9 +189,7 @@ class OzonFboClient:
             )
             data = self._post("/v3/supply-order/get", body)
 
-            res = data.get("result") or {}
-            # В доке чаще всего поле orders
-            orders = res.get("orders") or res.get("supply_orders") or []
+            orders = data.get("orders") or data.get("result", {}).get("orders") or []
             if not isinstance(orders, list):
                 print(
                     "[OZON FBO] Неожиданный формат ответа /v3/supply-order/get: "
@@ -213,10 +198,8 @@ class OzonFboClient:
                 continue
 
             for o in orders:
-                # чуть обогащаем
                 o["_ozon_account"] = self.account_name
-                # сам ID заявки — либо в o["id"], либо в o["order_id"]
-                o["_order_id"] = o.get("id") or o.get("order_id")
+                o["_order_id"] = o.get("order_id") or o.get("id")
                 result.append(o)
 
         print(
@@ -233,13 +216,6 @@ class OzonFboClient:
         """
         Получить список товаров по bundle_id (часть поставки).
         /v1/supply-order/bundle
-        body:
-        {
-          "bundle_ids": ["..."],
-          "limit": 100,
-          "is_asc": true,
-          "last_id": "..."
-        }
         """
         if not bundle_id:
             return []
