@@ -46,7 +46,7 @@ class OzonFboClient:
     # БАЗОВЫЙ POST
     # --------------------------
 
-        def _post(self, path: str, body: dict) -> dict:
+    def _post(self, path: str, body: dict) -> dict:
         """
         Базовый POST с обработкой 429 (rate limit) через небольшие паузы и повторы.
         """
