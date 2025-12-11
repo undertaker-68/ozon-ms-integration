@@ -48,10 +48,13 @@ MS_STATE_FBO_HREF = os.getenv("MS_STATE_FBO_HREF")
 # Статус отгрузки для FBO (опционально)
 MS_FBO_DEMAND_STATE_HREF = os.getenv("MS_FBO_DEMAND_STATE_HREF")
 
+# Статус перемещения "Поставка" (опционально)
+MS_STATE_MOVE_FBO_HREF = os.getenv("MS_STATE_MOVE_FBO_HREF")
+
 if not MS_ORGANIZATION_HREF or not MS_FBO_AGENT_HREF or not MS_FBO_STORE_HREF:
     raise RuntimeError("Не заданы MS_ORGANIZATION_HREF / MS_AGENT_HREF / MS_STORE_HREF в .env")
 
-# Состояния поставок Ozon, при которых создаём Отгрузку в МС
+# Состояния поставок Ozon, при которых создаём ОТГРУЗКУ в МС
 DEMAND_CREATE_SUPPLY_STATES = {
     "IN_TRANSIT",
     "ACCEPTANCE_AT_STORAGE_WAREHOUSE",
@@ -141,20 +144,28 @@ def _save_fbo_state(state: dict) -> None:
 
 
 # ==========================
-# МОЙСКЛАД: ОТГРУЗКИ
+# МОЙСКЛАД: ОТГРУЗКИ / ПЕРЕМЕЩЕНИЯ
 # ==========================
 
 def _has_demand_for_order(order_href: str) -> bool:
-    url = f"{MS_BASE_URL}/entity/demand"
-    params = {
-        "filter": f"customerOrder={order_href}",
-        "limit": 1,
-    }
+    """
+    Проверяем, есть ли у заказа хотя бы одна отгрузка.
+    Используем подресурс /customerorder/{id}/demands
+    вместо фильтра по /entity/demand.
+    """
+    if not order_href:
+        return False
+
+    url = order_href.rstrip("/") + "/demands"
+    params = {"limit": 1}
 
     try:
         r = requests.get(url, headers=MS_HEADERS, params=params, timeout=30)
     except Exception as e:  # noqa: BLE001
         print(f"[MS] Ошибка запроса списка отгрузок по заказу: {e!r}")
+        return False
+
+    if r.status_code in (404, 410):
         return False
 
     if r.status_code >= 400:
@@ -165,6 +176,40 @@ def _has_demand_for_order(order_href: str) -> bool:
         data = r.json()
     except Exception as e:  # noqa: BLE001
         print(f"[MS] Ошибка парсинга ответа при получении отгрузок: {e!r}")
+        return False
+
+    rows = data.get("rows") or []
+    return bool(rows)
+
+
+def _has_move_for_order(order_href: str) -> bool:
+    """
+    Проверяем, есть ли у заказа хотя бы одно перемещение.
+    /customerorder/{id}/moves
+    """
+    if not order_href:
+        return False
+
+    url = order_href.rstrip("/") + "/moves"
+    params = {"limit": 1}
+
+    try:
+        r = requests.get(url, headers=MS_HEADERS, params=params, timeout=30)
+    except Exception as e:  # noqa: BLE001
+        print(f"[MS] Ошибка запроса списка перемещений по заказу: {e!r}")
+        return False
+
+    if r.status_code in (404, 410):
+        return False
+
+    if r.status_code >= 400:
+        print(f"[MS] Ошибка получения перемещений: {r.status_code} {r.text[:500]}")
+        return False
+
+    try:
+        data = r.json()
+    except Exception as e:  # noqa: BLE001
+        print(f"[MS] Ошибка парсинга ответа при получении перемещений: {e!r}")
         return False
 
     rows = data.get("rows") or []
@@ -197,6 +242,82 @@ def _update_demand_state(demand: dict) -> None:
         return
 
     print("[MS] Статус отгрузки FBO обновлён.")
+
+
+def _create_move_from_order(order: dict) -> dict:
+    """
+    Создаёт перемещение (move) со склада СКЛАД на склад FBO
+    на основании позиций заказа.
+    """
+    order_meta = order.get("meta") or {}
+    order_href = order_meta.get("href")
+    if not order_href:
+        raise ValueError("У заказа нет meta.href, не можем создать перемещение")
+
+    # На всякий случай добираем полный заказ, если нет позиций
+    if not order.get("positions"):
+        url = order_href
+        r = requests.get(url, headers=MS_HEADERS, timeout=30)
+        r.raise_for_status()
+        order = r.json()
+
+    positions = order.get("positions") or []
+    if not isinstance(positions, list):
+        positions = []
+
+    move_positions: list[dict] = []
+    for pos in positions:
+        if not isinstance(pos, dict):
+            continue
+        assort = pos.get("assortment")
+        if not assort:
+            continue
+        move_positions.append(
+            {
+                "quantity": pos.get("quantity", 0) or 0,
+                "assortment": assort,
+            }
+        )
+
+    if not move_positions:
+        raise ValueError("В заказе нет позиций для перемещения")
+
+    # Организация/склады
+    org_meta = order.get("organization", {}).get("meta") or _build_ms_meta(
+        MS_ORGANIZATION_HREF, "organization"
+    )
+    source_store_meta = order.get("store", {}).get("meta") or _build_ms_meta(
+        MS_STORE_HREF, "store"
+    )
+    target_store_meta = _build_ms_meta(MS_FBO_STORE_HREF, "store")
+
+    payload: dict = {
+        "organization": {"meta": org_meta},
+        "sourceStore": {"meta": source_store_meta},
+        "targetStore": {"meta": target_store_meta},
+        "positions": move_positions,
+        # Комментарий один в один из заказа
+        "description": order.get("description"),
+    }
+
+    # Статус перемещения "Поставка", если задан
+    if MS_STATE_MOVE_FBO_HREF:
+        payload["state"] = {
+            "meta": _build_ms_meta(MS_STATE_MOVE_FBO_HREF, "state"),
+        }
+
+    move_name = order.get("name")
+    if move_name:
+        payload["name"] = move_name
+
+    url = f"{MS_BASE_URL}/entity/move"
+    r = requests.post(url, headers=MS_HEADERS, json=payload, timeout=30)
+    if r.status_code >= 400:
+        print(f"[MS] Ошибка создания перемещения: {r.status_code} {r.text[:500]}")
+        r.raise_for_status()
+    move = r.json()
+    print(f"[MS] Создано перемещение по заказу {move_name}")
+    return move
 
 
 # ==========================
@@ -246,7 +367,7 @@ def _collect_positions_from_supply(order: dict, client: OzonFboClient) -> tuple[
             )
 
             if offer is None or str(offer).strip() == "":
-                # В крайнем случае пробуем sku (если вдруг в МС артикулы = sku)
+                # В крайнем случае пробуем sku
                 sku = item.get("sku")
                 if sku is not None:
                     offer = str(sku)
@@ -302,7 +423,7 @@ def _process_single_fbo_order(order: dict, client: OzonFboClient, dry_run: bool)
     Обработка одной FBO-заявки:
       - создаём/обновляем заказ в МойСклад
       - проставляем статус FBO (если MS_STATE_FBO_HREF)
-      - создаём отгрузку при нужных состояниях поставки
+      - при нужных состояниях создаём перемещение и отгрузку
     """
     ozon_account = order.get("_ozon_account") or "ozon1"
     order_id = order.get("_order_id") or order.get("order_id")
@@ -320,8 +441,7 @@ def _process_single_fbo_order(order: dict, client: OzonFboClient, dry_run: bool)
     if not isinstance(supplies, list):
         supplies = []
 
-    first_supply = supplies[0] if supplies else {}
-
+    # Состояния по поставке (supplies[].state)
     supply_states = {
         str((s or {}).get("state") or "").upper()
         for s in supplies
@@ -329,22 +449,30 @@ def _process_single_fbo_order(order: dict, client: OzonFboClient, dry_run: bool)
     }
     order_state = (order.get("state") or "").upper()
 
+    # Если сама заявка уже CANCELLED — просто пропускаем, ничего не создаём
+    if order_state == "CANCELLED":
+        print(f"[FBO] Заявка {order_number} state=CANCELLED — пропускаем.")
+        return
+
+    # Склад назначения (storage_warehouse) первой supply
+    first_supply = supplies[0] if supplies else {}
     storage_wh = (first_supply.get("storage_warehouse") or {}) if first_supply else {}
     storage_name = storage_wh.get("name") or "N/A"
 
+    # Попробуем кластер взять из drop_off_warehouse.name (если нужно — потом подправим)
     dropoff_wh = order.get("drop_off_warehouse") or {}
     cluster_name = dropoff_wh.get("name") or ""
 
-    # Плановая дата: берём arrival_date склада назначения, если нет — timeslot / created_date
+    # Плановая дата: arrival_date склада назначения / timeslot / created_date
     arrival_raw = storage_wh.get("arrival_date") or first_supply.get("arrival_date")
     if not arrival_raw:
-        timeslot_block = (first_supply.get("timeslot") or {}).get("timeslot") or {}
+        timeslot_block = (order.get("timeslot") or {}).get("timeslot") or {}
         arrival_raw = timeslot_block.get("from") or order.get("created_date")
 
     arrival_dt = _parse_ozon_datetime(arrival_raw) if isinstance(arrival_raw, str) else None
     planned_moment = _to_ms_moment(arrival_dt)
 
-    # Комментарий: <Номер поставки> - <Кластер> - <Склад назначения>
+    # Комментарий: номер заявки - кластер - склад назначения
     comment_parts = [order_number]
     if cluster_name:
         comment_parts.append(cluster_name)
@@ -398,7 +526,7 @@ def _process_single_fbo_order(order: dict, client: OzonFboClient, dry_run: bool)
         "description": comment,
     }
 
-    # Плановая дата в оба поля, чтобы точно отображалась в UI МойСклад
+    # Плановая дата в оба поля, чтобы точно подсветилась в UI
     if planned_moment:
         payload["shipmentPlannedMoment"] = planned_moment
         payload["deliveryPlannedMoment"] = planned_moment
@@ -477,16 +605,22 @@ def _process_single_fbo_order(order: dict, client: OzonFboClient, dry_run: bool)
         except Exception:
             pass
 
-    # Создание отгрузки по нужным состояниям поставки
-    if (
-        supply_states & DEMAND_CREATE_SUPPLY_STATES
-        and not _has_demand_for_order(ms_order_href)
-    ):
-        print(
-            f"[FBO] Для заказа {order_name} (поставка {order_number}) "
-            f"создаём отгрузку (состояния: {supply_states})"
-        )
-        if not dry_run:
+    # === ПЕРЕМЕЩЕНИЕ + ОТГРУЗКА ===
+
+    need_demand = bool(supply_states & DEMAND_CREATE_SUPPLY_STATES)
+
+    if need_demand:
+        # 1) Перемещение со склада СКЛАД на FBO (если ещё нет)
+        if not _has_move_for_order(ms_order_href):
+            print(f"[FBO] Для заказа {order_name} создаём перемещение (СКЛАД → FBO).")
+            _create_move_from_order(ms_order)
+
+        # 2) Отгрузка по заказу (если ещё нет)
+        if not _has_demand_for_order(ms_order_href):
+            print(
+                f"[FBO] Для заказа {order_name} (поставка {order_number}) "
+                f"создаём отгрузку (состояния поставки: {supply_states})"
+            )
             demand = create_demand_from_order(ms_order)
             _update_demand_state(demand)
 
@@ -498,11 +632,15 @@ def _process_single_fbo_order(order: dict, client: OzonFboClient, dry_run: bool)
                 send_telegram_message(text)
             except Exception:
                 pass
+        else:
+            print(
+                f"[FBO] Для заказа {order_name} отгрузка уже существует, "
+                f"повторно не создаём."
+            )
     else:
         print(
             f"[FBO] Для заказа {order_name} отгрузка не создаётся: "
-            f"supply_states={supply_states}, "
-            f"есть_отгрузка={_has_demand_for_order(ms_order_href)}"
+            f"supply_states={supply_states}, need_demand={need_demand}"
         )
 
 
