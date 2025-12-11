@@ -1,5 +1,6 @@
 import os
 from datetime import datetime, timedelta, timezone
+import time
 
 import requests
 from dotenv import load_dotenv
@@ -45,19 +46,43 @@ class OzonFboClient:
     # БАЗОВЫЙ POST
     # --------------------------
 
-    def _post(self, path: str, body: dict) -> dict:
+        def _post(self, path: str, body: dict) -> dict:
+        """
+        Базовый POST с обработкой 429 (rate limit) через небольшие паузы и повторы.
+        """
         url = f"{OZON_API_URL}{path}"
 
-        try:
-            r = requests.post(url, json=body, headers=self.headers, timeout=30)
-        except Exception as e:  # noqa: BLE001
-            msg = f"❗ Ошибка запроса к Ozon {path} ({self.account_name}): {e!r}"
-            print(msg)
+        max_retries = 3
+        for attempt in range(max_retries):
             try:
-                send_telegram_message(msg)
-            except Exception:
-                pass
-            raise
+                r = requests.post(url, json=body, headers=self.headers, timeout=30)
+            except Exception as e:  # noqa: BLE001
+                msg = f"❗ Ошибка запроса к Ozon {path} ({self.account_name}): {e!r}"
+                print(msg)
+                try:
+                    send_telegram_message(msg)
+                except Exception:
+                    pass
+                raise
+
+            # Лимит запросов — делаем паузу и повторяем
+            if r.status_code == 429 and attempt < max_retries - 1:
+                msg = (
+                    f"⚠ Лимит запросов Ozon (429) на {path} "
+                    f"({self.account_name}), попытка {attempt + 1}/{max_retries}"
+                )
+                print(msg)
+                try:
+                    send_telegram_message(msg)
+                except Exception:
+                    pass
+
+                # небольшая экспоненциальная пауза
+                time.sleep(1 + attempt * 2)
+                continue
+
+            # выходим из цикла — либо нормальный код, либо не 429
+            break
 
         if r.status_code != 200:
             msg = (
@@ -82,10 +107,6 @@ class OzonFboClient:
             except Exception:
                 pass
             raise
-
-    # --------------------------
-    # FBO: СПИСОК ID ЗАЯВОК
-    # --------------------------
 
     def list_supply_order_ids(
         self,
