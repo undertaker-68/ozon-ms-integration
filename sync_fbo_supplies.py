@@ -207,16 +207,22 @@ def _collect_positions_from_supply(order: dict, client: OzonFboClient) -> tuple[
     """
     Собираем позиции поставки из всех bundle в заявке FBO.
     Возвращаем:
-      - список позиций (ms_meta + quantity)
+      - список позиций (ms_meta + quantity + price)
       - список текстов ошибок (по товарам, которые не удалось сопоставить)
     """
     all_positions: list[dict] = []
     errors: list[str] = []
 
     supplies = order.get("supplies") or []
+    if not isinstance(supplies, list):
+        supplies = []
+
     order_id = order.get("order_id")
 
     for supply in supplies:
+        if not isinstance(supply, dict):
+            continue
+
         bundle_id = supply.get("bundle_id")
         if not bundle_id:
             continue
@@ -229,6 +235,9 @@ def _collect_positions_from_supply(order: dict, client: OzonFboClient) -> tuple[
         )
 
         for item in items:
+            if not isinstance(item, dict):
+                continue
+
             # --- ВАЖНО: берём именно артикул продавца, а не sku ---
             offer = (
                 item.get("offer_id")
@@ -237,7 +246,7 @@ def _collect_positions_from_supply(order: dict, client: OzonFboClient) -> tuple[
             )
 
             if offer is None or str(offer).strip() == "":
-                # В самом крайнем случае пробуем sku (если вдруг в МС артикулы = sku)
+                # В крайнем случае пробуем sku (если вдруг в МС артикулы = sku)
                 sku = item.get("sku")
                 if sku is not None:
                     offer = str(sku)
@@ -248,41 +257,53 @@ def _collect_positions_from_supply(order: dict, client: OzonFboClient) -> tuple[
                     f"нет offer_id / vendor_code / contractor_item_code / sku"
                 )
                 print(msg)
-                # В Telegram по этой мелочи не шлём, чтобы не спамить
                 errors.append(msg)
                 continue
 
             offer = str(offer).strip()
             quantity = item.get("quantity") or 0
+            if quantity <= 0:
+                continue
 
-                    product = find_product_by_article(offer)
-        if not product:
-            msg = (
-                f"[FBO] Товар с артикулом '{offer}' не найден в МойСклад "
-                f"(bundle_id={bundle_id}, заявка {order_id})"
+            product = find_product_by_article(offer)
+            if not product:
+                msg = (
+                    f"[FBO] Товар с артикулом '{offer}' не найден в МойСклад "
+                    f"(bundle_id={bundle_id}, заявка {order_id})"
+                )
+                print(msg)
+                errors.append(msg)
+                continue
+
+            # Базовая цена продажи из МойСклад (salePrices[0].value, в копейках)
+            price = None
+            sale_prices = product.get("salePrices")
+            if isinstance(sale_prices, list) and sale_prices:
+                first_price = sale_prices[0] or {}
+                price = first_price.get("value")
+
+            all_positions.append(
+                {
+                    "ms_meta": product["meta"],
+                    "quantity": quantity,
+                    "price": price,
+                }
             )
-            print(msg)
-            errors.append(msg)
-            continue
-
-        # Базовая цена продажи из МойСклад (salePrices[0].value, в копейках)
-        price = None
-        sale_prices = product.get("salePrices")
-        if isinstance(sale_prices, list) and sale_prices:
-            first_price = sale_prices[0] or {}
-            price = first_price.get("value")
-
-        all_positions.append(
-            {
-                "ms_meta": product["meta"],
-                "quantity": quantity,
-                "price": price,
-            }
-        )
 
     return all_positions, errors
 
+
+# ==========================
+# ОБРАБОТКА ОДНОЙ ЗАЯВКИ
+# ==========================
+
 def _process_single_fbo_order(order: dict, client: OzonFboClient, dry_run: bool) -> None:
+    """
+    Обработка одной FBO-заявки:
+      - создаём/обновляем заказ в МойСклад
+      - проставляем статус FBO (если MS_STATE_FBO_HREF)
+      - создаём отгрузку при нужных состояниях поставки
+    """
     ozon_account = order.get("_ozon_account") or "ozon1"
     order_id = order.get("_order_id") or order.get("order_id")
 
@@ -304,6 +325,7 @@ def _process_single_fbo_order(order: dict, client: OzonFboClient, dry_run: bool)
     supply_states = {
         str((s or {}).get("state") or "").upper()
         for s in supplies
+        if isinstance(s, dict)
     }
     order_state = (order.get("state") or "").upper()
 
@@ -313,14 +335,16 @@ def _process_single_fbo_order(order: dict, client: OzonFboClient, dry_run: bool)
     dropoff_wh = order.get("drop_off_warehouse") or {}
     cluster_name = dropoff_wh.get("name") or ""
 
+    # Плановая дата: берём arrival_date склада назначения, если нет — timeslot / created_date
     arrival_raw = storage_wh.get("arrival_date") or first_supply.get("arrival_date")
     if not arrival_raw:
-        timeslot = (first_supply.get("timeslot") or {}).get("timeslot") or {}
-        arrival_raw = timeslot.get("from") or order.get("created_date")
+        timeslot_block = (first_supply.get("timeslot") or {}).get("timeslot") or {}
+        arrival_raw = timeslot_block.get("from") or order.get("created_date")
 
     arrival_dt = _parse_ozon_datetime(arrival_raw) if isinstance(arrival_raw, str) else None
     planned_moment = _to_ms_moment(arrival_dt)
 
+    # Комментарий: <Номер поставки> - <Кластер> - <Склад назначения>
     comment_parts = [order_number]
     if cluster_name:
         comment_parts.append(cluster_name)
@@ -331,7 +355,7 @@ def _process_single_fbo_order(order: dict, client: OzonFboClient, dry_run: bool)
     raw_positions, pos_errors = _collect_positions_from_supply(order, client)
 
     if not raw_positions and pos_errors:
-        msg = f"По FBO-поставке {order_number} не удалось подобрать ни одной позиции МС."
+        msg = f"По FBO-поставке {order_number} не удалось подобрать ни одной позиции МойСклад."
         print("[FBO] " + msg)
         text = f"❗ {msg}\n" + "\n".join(pos_errors[:10])
         try:
@@ -374,9 +398,12 @@ def _process_single_fbo_order(order: dict, client: OzonFboClient, dry_run: bool)
         "description": comment,
     }
 
+    # Плановая дата в оба поля, чтобы точно отображалась в UI МойСклад
     if planned_moment:
         payload["shipmentPlannedMoment"] = planned_moment
+        payload["deliveryPlannedMoment"] = planned_moment
 
+    # Статус заказа "FBO" (если задан)
     if MS_STATE_FBO_HREF:
         payload["state"] = {
             "meta": _build_ms_meta(MS_STATE_FBO_HREF, "state"),
@@ -402,6 +429,7 @@ def _process_single_fbo_order(order: dict, client: OzonFboClient, dry_run: bool)
         }
         if planned_moment:
             update_payload["shipmentPlannedMoment"] = planned_moment
+            update_payload["deliveryPlannedMoment"] = planned_moment
         if MS_STATE_FBO_HREF:
             update_payload["state"] = {
                 "meta": _build_ms_meta(MS_STATE_FBO_HREF, "state"),
@@ -449,6 +477,7 @@ def _process_single_fbo_order(order: dict, client: OzonFboClient, dry_run: bool)
         except Exception:
             pass
 
+    # Создание отгрузки по нужным состояниям поставки
     if (
         supply_states & DEMAND_CREATE_SUPPLY_STATES
         and not _has_demand_for_order(ms_order_href)
@@ -537,6 +566,7 @@ def sync_fbo_supplies(limit: int = 50, days_back: int = 30, dry_run: bool | None
             f"{len(orders)}"
         )
 
+        # Первый запуск: только запоминаем ID, ничего не создаём
         if first_run and not dry_run:
             for order in orders:
                 oid = order.get("_order_id") or order.get("order_id")
@@ -548,6 +578,7 @@ def sync_fbo_supplies(limit: int = 50, days_back: int = 30, dry_run: bool | None
             )
             continue
 
+        # Обычный режим: обрабатываем только новые заявки
         for order in orders:
             oid = order.get("_order_id") or order.get("order_id")
             if not isinstance(oid, int):
