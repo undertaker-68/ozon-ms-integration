@@ -255,18 +255,17 @@ def _collect_positions_from_supply(order: dict, client: OzonFboClient) -> tuple[
             offer = str(offer).strip()
             quantity = item.get("quantity") or 0
 
-            product = find_product_by_article(offer)
-            if not product:
-                msg = (
-                    f"[FBO] Товар с артикулом '{offer}' не найден в МойСклад "
-                    f"(bundle_id={bundle_id}, заявка {order_id})"
-                )
-                print(msg)
-                # Тут тоже лог оставляем только в файл/консоль
-                errors.append(msg)
-                continue
+                    product = find_product_by_article(offer)
+        if not product:
+            msg = (
+                f"[FBO] Товар с артикулом '{offer}' не найден в МойСклад "
+                f"(bundle_id={bundle_id}, заявка {order_id})"
+            )
+            print(msg)
+            errors.append(msg)
+            continue
 
-                    # Базовая цена продажи из МойСклад (salePrices[0].value, в копейках)
+        # Базовая цена продажи из МойСклад (salePrices[0].value, в копейках)
         price = None
         sale_prices = product.get("salePrices")
         if isinstance(sale_prices, list) and sale_prices:
