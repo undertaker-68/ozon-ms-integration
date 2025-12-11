@@ -104,7 +104,7 @@ class OzonFboClient:
             print(msg)
             try:
                 send_telegram_message(msg)
-            except Exception):
+            except Exception:
                 pass
             raise
 
