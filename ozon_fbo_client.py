@@ -141,15 +141,15 @@ class OzonFboClient:
             ]
 
         body = {
-            "filter": {
-                "states": states,
-                "from": since.isoformat(timespec="seconds").replace("+00:00", "Z"),
-                "to": now.isoformat(timespec="seconds").replace("+00:00", "Z"),
-            },
-            "limit": min(limit, 50),
-            "sort_by": "ORDER_CREATION",
-            "sort_dir": "ASC",
-        }
+    "filter": {
+        "states": states,
+        "from": since.isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "to": now.isoformat(timespec="seconds").replace("+00:00", "Z"),
+    },
+    "limit": min(limit, 50),
+    "sort_by": "ORDER_CREATION",
+    "sort_dir": "DESC",  # ← вот так
+}
 
         print(
             f"[OZON FBO] Запрос списка заявок на поставку "
