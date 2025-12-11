@@ -204,65 +204,76 @@ def _update_demand_state(demand: dict) -> None:
 # ==========================
 
 def _collect_positions_from_supply(order: dict, client: OzonFboClient) -> tuple[list[dict], list[str]]:
-    supplies = order.get("supplies") or []
-    if not isinstance(supplies, list):
-        supplies = []
-
-    aggregated: dict[str, float] = {}
+    """
+    Собираем позиции поставки из всех bundle в заявке FBO.
+    Возвращаем:
+      - список позиций (ms_meta + quantity)
+      - список текстов ошибок (по товарам, которые не удалось сопоставить)
+    """
+    all_positions: list[dict] = []
     errors: list[str] = []
 
+    supplies = order.get("supplies") or []
+    order_id = order.get("order_id")
+
     for supply in supplies:
-        bundle_id = (supply or {}).get("bundle_id")
+        bundle_id = supply.get("bundle_id")
         if not bundle_id:
             continue
 
+        # Получаем товары по bundle_id
         items = client.get_bundle_items(bundle_id)
+        print(
+            f"[OZON FBO] Для bundle_id={bundle_id} ({client.account_name}) "
+            f"получено товаров: {len(items)}"
+        )
 
         for item in items:
-            # по документации FBO: contractor_item_code — артикул продавца
-            offer = (item.get("contractor_item_code") or "").strip()
-            if not offer:
+            # --- ВАЖНО: берём именно артикул продавца, а не sku ---
+            offer = (
+                item.get("offer_id")
+                or item.get("vendor_code")
+                or item.get("contractor_item_code")
+            )
+
+            if offer is None or str(offer).strip() == "":
+                # В самом крайнем случае пробуем sku (если вдруг в МС артикулы = sku)
                 sku = item.get("sku")
                 if sku is not None:
                     offer = str(sku)
 
-            qty = item.get("quantity") or 0
-            if not offer or qty <= 0:
+            if not offer:
+                msg = (
+                    f"[FBO] В позиции bundle_id={bundle_id} заявки {order_id} "
+                    f"нет offer_id / vendor_code / contractor_item_code / sku"
+                )
+                print(msg)
+                # В Telegram по этой мелочи не шлём, чтобы не спамить
+                errors.append(msg)
                 continue
 
-            aggregated[offer] = aggregated.get(offer, 0) + qty
+            offer = str(offer).strip()
+            quantity = item.get("quantity") or 0
 
-    positions: list[dict] = []
+            product = find_product_by_article(offer)
+            if not product:
+                msg = (
+                    f"[FBO] Товар с артикулом '{offer}' не найден в МойСклад "
+                    f"(bundle_id={bundle_id}, заявка {order_id})"
+                )
+                print(msg)
+                # Тут тоже лог оставляем только в файл/консоль
+                errors.append(msg)
+                continue
 
-    for offer_id, quantity in aggregated.items():
-        product = find_product_by_article(offer_id)
-        if not product:
-            msg = f"Товар с артикулом {offer_id!r} не найден в МойСклад"
-            print("[FBO] " + msg)
-            errors.append(msg)
-            continue
+            all_positions.append(
+                {
+                    "ms_meta": product["meta"],
+                    "quantity": quantity,
+                }
+            )
 
-        price = None
-        sale_prices = product.get("salePrices")
-        if isinstance(sale_prices, list) and sale_prices:
-            first_price = sale_prices[0] or {}
-            price = first_price.get("value")
-
-        positions.append(
-            {
-                "ms_meta": product["meta"],
-                "quantity": quantity,
-                "price": price,
-                "offer_id": offer_id,
-            }
-        )
-
-    return positions, errors
-
-
-# ==========================
-# ОБРАБОТКА ОДНОЙ ЗАЯВКИ
-# ==========================
+    return all_positions, errors
 
 def _process_single_fbo_order(order: dict, client: OzonFboClient, dry_run: bool) -> None:
     ozon_account = order.get("_ozon_account") or "ozon1"
