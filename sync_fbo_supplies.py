@@ -461,7 +461,7 @@ def _process_single_fbo_order(order: dict, client: OzonFboClient, dry_run: bool)
 
     # Попробуем кластер взять из drop_off_warehouse.name (если нужно — потом подправим)
     dropoff_wh = order.get("drop_off_warehouse") or {}
-    cluster_name = dropoff_wh.get("name") or ""
+    cluster_name = ""
 
     # Плановая дата: arrival_date склада назначения / timeslot / created_date
     arrival_raw = storage_wh.get("arrival_date") or first_supply.get("arrival_date")
