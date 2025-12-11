@@ -202,7 +202,7 @@ def process_posting(posting: dict, dry_run: bool) -> None:
     positions_payload: list[dict] = []
     for pos in ms_positions:
         item_payload = {
-            "quantity": pos["quantity"]
+            "quantity": pos["quantity"],
             "reserve": pos["quantity"],
             "assortment": {"meta": pos["ms_meta"]},
         }
