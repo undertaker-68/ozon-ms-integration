@@ -131,13 +131,16 @@ class OzonFboClient:
         # Нормальный набор состояний для работы
         if states is None:
             states = [
-                "CREATED",
-                "ACCEPTED",
-                "READY_TO_SUPPLY",
-                "RESERVED",
-                "IN_TRANSIT",
-                "ACCEPTANCE_AT_STORAGE_WAREHOUSE",
-                "FINISHED",
+            "DATA_FILLING",                   # заполнение данных / черновик
+            "CREATED",                        # создана
+            "READY_TO_SUPPLY",                # готова к поставке
+            "ACCEPTED_AT_SUPPLY_WAREHOUSE",   # принята на складе поставки
+            "IN_TRANSIT",                     # в пути
+            "ACCEPTANCE_AT_STORAGE_WAREHOUSE",# приёмка на склад хранения
+            "REPORTS_CONFIRMATION_AWAITING",  # ждёт подтверждения отчётов
+            "REPORT_REJECTED",                # отчёт отклонён
+            "COMPLETED",                      # завершена
+            "CANCELLED",                      # отменена
             ]
 
         body = {
