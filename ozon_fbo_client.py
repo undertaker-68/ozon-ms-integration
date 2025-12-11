@@ -121,10 +121,8 @@ class OzonFboClient:
         """
         Получить ID заявок на поставку FBO за последние N дней.
 
-        Для твоего кабинета:
-          - обязательное поле filter.states (минимум 1 состояние)
-          - sort_by="ORDER_CREATION"
-          - sort_dir="DESC" (сначала новые)
+        ВАЖНО: мы *не* берём CANCELLED / COMPLETED,
+        чтобы не трогать удалённые/законченные поставки.
         """
         if limit <= 0:
             return []
@@ -132,19 +130,16 @@ class OzonFboClient:
         now = datetime.now(timezone.utc)
         since = now - timedelta(days=days_back)
 
-        # Полный набор статусов, чтобы видеть и черновики, и завершённые
+        # Статусы для "Подготовка к поставкам" + в пути/приёмка
         if states is None:
             states = [
-                "DATA_FILLING",                    # заполнение данных / черновик
+                "DATA_FILLING",                    # черновик / заполнение
                 "CREATED",                         # создана
                 "READY_TO_SUPPLY",                 # готова к поставке
                 "ACCEPTED_AT_SUPPLY_WAREHOUSE",    # принята на складе поставки
                 "IN_TRANSIT",                      # в пути
                 "ACCEPTANCE_AT_STORAGE_WAREHOUSE", # приёмка на склад хранения
                 "REPORTS_CONFIRMATION_AWAITING",   # ждёт подтверждения отчётов
-                "REPORT_REJECTED",                 # отчёт отклонён
-                "COMPLETED",                       # завершена
-                "CANCELLED",                       # отменена
             ]
 
         body = {
@@ -194,11 +189,6 @@ class OzonFboClient:
     ) -> list[dict]:
         """
         Получить список детальных заявок на поставку.
-
-        В твоём кабинете ответ /v3/supply-order/get выглядит так:
-        {
-          "orders": [ {...}, {...} ]
-        }
         """
         order_ids = self.list_supply_order_ids(limit=limit, days_back=days_back, states=states)
         if not order_ids:
