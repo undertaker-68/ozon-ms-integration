@@ -77,7 +77,7 @@ class OzonFboClient:
                 except Exception:
                     pass
 
-                # небольшая экспоненциальная пауза
+                # небольшая экспоненциальная пауза: 1s, 3s, 5s
                 time.sleep(1 + attempt * 2)
                 continue
 
@@ -104,9 +104,13 @@ class OzonFboClient:
             print(msg)
             try:
                 send_telegram_message(msg)
-            except Exception:
+            except Exception):
                 pass
             raise
+
+    # --------------------------
+    # FBO: СПИСОК ID ЗАЯВОК
+    # --------------------------
 
     def list_supply_order_ids(
         self,
@@ -117,10 +121,10 @@ class OzonFboClient:
         """
         Получить ID заявок на поставку FBO за последние N дней.
 
-        Твой кабинет принимает:
+        Для твоего кабинета:
           - обязательное поле filter.states (минимум 1 состояние)
           - sort_by="ORDER_CREATION"
-          - sort_dir="ASC"
+          - sort_dir="DESC" (сначала новые)
         """
         if limit <= 0:
             return []
@@ -128,31 +132,31 @@ class OzonFboClient:
         now = datetime.now(timezone.utc)
         since = now - timedelta(days=days_back)
 
-        # Нормальный набор состояний для работы
+        # Полный набор статусов, чтобы видеть и черновики, и завершённые
         if states is None:
             states = [
-            "DATA_FILLING",                   # заполнение данных / черновик
-            "CREATED",                        # создана
-            "READY_TO_SUPPLY",                # готова к поставке
-            "ACCEPTED_AT_SUPPLY_WAREHOUSE",   # принята на складе поставки
-            "IN_TRANSIT",                     # в пути
-            "ACCEPTANCE_AT_STORAGE_WAREHOUSE",# приёмка на склад хранения
-            "REPORTS_CONFIRMATION_AWAITING",  # ждёт подтверждения отчётов
-            "REPORT_REJECTED",                # отчёт отклонён
-            "COMPLETED",                      # завершена
-            "CANCELLED",                      # отменена
+                "DATA_FILLING",                    # заполнение данных / черновик
+                "CREATED",                         # создана
+                "READY_TO_SUPPLY",                 # готова к поставке
+                "ACCEPTED_AT_SUPPLY_WAREHOUSE",    # принята на складе поставки
+                "IN_TRANSIT",                      # в пути
+                "ACCEPTANCE_AT_STORAGE_WAREHOUSE", # приёмка на склад хранения
+                "REPORTS_CONFIRMATION_AWAITING",   # ждёт подтверждения отчётов
+                "REPORT_REJECTED",                 # отчёт отклонён
+                "COMPLETED",                       # завершена
+                "CANCELLED",                       # отменена
             ]
 
         body = {
-    "filter": {
-        "states": states,
-        "from": since.isoformat(timespec="seconds").replace("+00:00", "Z"),
-        "to": now.isoformat(timespec="seconds").replace("+00:00", "Z"),
-    },
-    "limit": min(limit, 50),
-    "sort_by": "ORDER_CREATION",
-    "sort_dir": "DESC",  # ← вот так
-}
+            "filter": {
+                "states": states,
+                "from": since.isoformat(timespec="seconds").replace("+00:00", "Z"),
+                "to": now.isoformat(timespec="seconds").replace("+00:00", "Z"),
+            },
+            "limit": min(limit, 50),
+            "sort_by": "ORDER_CREATION",
+            "sort_dir": "DESC",
+        }
 
         print(
             f"[OZON FBO] Запрос списка заявок на поставку "
@@ -201,8 +205,8 @@ class OzonFboClient:
             return []
 
         result: list[dict] = []
-
         chunk_size = 50
+
         for i in range(0, len(order_ids), chunk_size):
             chunk = order_ids[i : i + chunk_size]
             body = {"order_ids": chunk}
@@ -256,7 +260,17 @@ class OzonFboClient:
             if last_id:
                 body["last_id"] = last_id
 
-            data = self._post("/v1/supply-order/bundle", body)
+            try:
+                data = self._post("/v1/supply-order/bundle", body)
+            except requests.HTTPError as e:
+                # Если даже после ретраев 429 — просто пропускаем эту поставку
+                if e.response is not None and e.response.status_code == 429:
+                    print(
+                        f"[OZON FBO] Достигнут лимит запросов по bundle_id={bundle_id} "
+                        f"({self.account_name}), пропускаем эту поставку в этом прогоне."
+                    )
+                    break
+                raise
 
             batch = data.get("items") or []
             if not isinstance(batch, list):
