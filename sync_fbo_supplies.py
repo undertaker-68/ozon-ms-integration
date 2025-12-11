@@ -266,12 +266,20 @@ def _collect_positions_from_supply(order: dict, client: OzonFboClient) -> tuple[
                 errors.append(msg)
                 continue
 
-            all_positions.append(
-                {
-                    "ms_meta": product["meta"],
-                    "quantity": quantity,
-                }
-            )
+                    # Базовая цена продажи из МойСклад (salePrices[0].value, в копейках)
+        price = None
+        sale_prices = product.get("salePrices")
+        if isinstance(sale_prices, list) and sale_prices:
+            first_price = sale_prices[0] or {}
+            price = first_price.get("value")
+
+        all_positions.append(
+            {
+                "ms_meta": product["meta"],
+                "quantity": quantity,
+                "price": price,
+            }
+        )
 
     return all_positions, errors
 
