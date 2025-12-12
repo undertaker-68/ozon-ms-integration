@@ -1,9 +1,11 @@
 import os
+import json
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from dotenv import load_dotenv
+from requests.exceptions import HTTPError
 
 from ozon_fbo_client import OzonFboClient
 from ms_client import (
@@ -21,31 +23,35 @@ load_dotenv()
 
 DRY_RUN_FBO = os.getenv("DRY_RUN_FBO", "false").lower() == "true"
 
-# ВРЕМЕННО: обновляем только эти 2 поставки, чтобы не трогать старые
+# Две текущие поставки должны обновляться всегда (как ты хотел)
 PINNED_ORDER_NUMBERS = {"2000037545485", "2000037485754"}
-FBO_CUTOFF_FILE = "fbo_cutoff.json"
 
-# "Подготовка к поставкам" (по твоему выводу debug_fbo_list.py)
+# Cutoff-файл: всё, что создано раньше cutoff, не трогаем (кроме pinned)
+FBO_CUTOFF_FILE = os.getenv("FBO_CUTOFF_FILE", "fbo_cutoff.json")
+
+# Только “Подготовка к поставкам”
 PREP_STATES = {"DATA_FILLING", "READY_TO_SUPPLY"}
 
-# МойСклад: сущности (берём из .env как у тебя уже настроено)
+# МойСклад
 MS_ORGANIZATION_HREF = os.getenv("MS_ORGANIZATION_HREF")
 MS_AGENT_HREF = os.getenv("MS_AGENT_HREF")
-MS_STORE_HREF = os.getenv("MS_STORE_HREF")
+MS_FBO_STORE_HREF = os.getenv("MS_FBO_STORE_HREF") or os.getenv("MS_STORE_HREF")
 
-# FBO-склад и FBO-статус (ты добавил)
-MS_FBO_STORE_HREF = os.getenv("MS_FBO_STORE_HREF") or MS_STORE_HREF
+# Статус заказа покупателя “FBO”
 MS_STATE_FBO_HREF = os.getenv("MS_STATE_FBO_HREF") or os.getenv("MS_STATE_FBO")
 
 if not MS_ORGANIZATION_HREF or not MS_AGENT_HREF or not MS_FBO_STORE_HREF:
-    raise RuntimeError("Не заданы MS_ORGANIZATION_HREF / MS_AGENT_HREF / MS_FBO_STORE_HREF (или MS_STORE_HREF)")
+    raise RuntimeError(
+        "Не заданы MS_ORGANIZATION_HREF / MS_AGENT_HREF / MS_FBO_STORE_HREF "
+        "(или MS_STORE_HREF). Проверь .env"
+    )
 
 # ==========================
 # ВСПОМОГАТЕЛЬНЫЕ
 # ==========================
 
 def _parse_ozon_dt(s: Optional[str]) -> Optional[datetime]:
-    if not s:
+    if not s or not isinstance(s, str):
         return None
     s = s.strip()
     if not s:
@@ -59,6 +65,9 @@ def _parse_ozon_dt(s: Optional[str]) -> Optional[datetime]:
 
 
 def _to_ms_moment(dt: Optional[datetime]) -> Optional[str]:
+    """
+    МойСклад принимает plannedMoment в формате 'YYYY-MM-DD HH:MM:SS'
+    """
     if not dt:
         return None
     dt = dt.astimezone(timezone.utc)
@@ -70,73 +79,121 @@ def _ms_meta(href: str, type_: str) -> Dict[str, Any]:
 
 
 def _cluster_from_storage_name(storage_name: str) -> str:
-    up = storage_name.upper()
+    up = (storage_name or "").upper()
     if "ПУШКИНО" in up:
         return "Москва и МО"
-    # простая эвристика: до первого "_" обычно город/кластер
-    return storage_name.split("_", 1)[0] if "_" in storage_name else storage_name
+    # если склад в формате ГОРОД_..., берём “ГОРОД”
+    if "_" in (storage_name or ""):
+        return storage_name.split("_", 1)[0]
+    return storage_name or "—"
 
 
-def _get_planned_dt_from_order(order: Dict[str, Any]) -> Optional[datetime]:
+def _load_cutoff() -> Optional[datetime]:
+    if not os.path.exists(FBO_CUTOFF_FILE):
+        return None
+    try:
+        with open(FBO_CUTOFF_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        s = data.get("cutoff")
+        return _parse_ozon_dt(s)
+    except Exception:
+        return None
+
+
+def _save_cutoff(dt: datetime) -> None:
+    dt = dt.astimezone(timezone.utc)
+    s = dt.isoformat().replace("+00:00", "Z")
+    with open(FBO_CUTOFF_FILE, "w", encoding="utf-8") as f:
+        json.dump({"cutoff": s}, f, ensure_ascii=False, indent=2)
+
+
+def _ms_call_retry(fn, *args, **kwargs):
     """
-    Для плановой даты:
-    1) storage_warehouse.arrival_date
-    2) timeslot.from
-    3) created_date
+    Ретрай на 429 от МойСклад, чтобы скрипт не умирал на лимитах.
+    """
+    max_tries = 5
+    backoff = 0.8
+    for attempt in range(1, max_tries + 1):
+        try:
+            return fn(*args, **kwargs)
+        except HTTPError as e:
+            code = getattr(e.response, "status_code", None)
+            if code == 429:
+                wait = backoff * attempt
+                print(f"[MS] 429 rate limit, попытка {attempt}/{max_tries}, ждём {wait:.1f}s")
+                time.sleep(wait)
+                continue
+            raise
+        except Exception:
+            # Если ms_client не пробрасывает HTTPError как надо,
+            # но в тексте встречается 429 — тоже перетерпим.
+            msg = repr(_) if False else ""  # no-op to appease linters
+            text = ""
+            try:
+                text = str(e)
+            except Exception:
+                text = repr(e)
+            if " 429 " in text or "status=429" in text or "Превышено ограничение" in text:
+                wait = backoff * attempt
+                print(f"[MS] Похоже на 429, попытка {attempt}/{max_tries}, ждём {wait:.1f}s")
+                time.sleep(wait)
+                continue
+            raise
+    raise RuntimeError("[MS] Не удалось выполнить запрос из-за постоянных 429")
+
+
+def _get_planned_dt(order: Dict[str, Any]) -> Optional[datetime]:
+    """
+    Планируемая дата = arrival_date склада назначения, если есть.
+    Иначе — created_date.
     """
     supplies = order.get("supplies") or []
     if isinstance(supplies, list) and supplies:
-        first = supplies[0] or {}
-        storage = (first.get("storage_warehouse") or {}) if isinstance(first, dict) else {}
-        arrival = storage.get("arrival_date")
-        dt = _parse_ozon_dt(arrival) if isinstance(arrival, str) else None
-        if dt:
-            return dt
-
-    timeslot = (order.get("timeslot") or {}).get("timeslot") or {}
-    if isinstance(timeslot, dict):
-        dt = _parse_ozon_dt(timeslot.get("from"))
-        if dt:
-            return dt
-
+        s0 = supplies[0] if isinstance(supplies[0], dict) else {}
+        storage = s0.get("storage_warehouse") or {}
+        if isinstance(storage, dict):
+            arrival = storage.get("arrival_date")
+            dt = _parse_ozon_dt(arrival)
+            if dt:
+                return dt
     return _parse_ozon_dt(order.get("created_date"))
 
 
 def _collect_positions(order: Dict[str, Any], client: OzonFboClient) -> Tuple[List[Dict[str, Any]], List[str]]:
     """
-    Берём товары по bundle и сопоставляем по артикулу продавца (offer_id/vendor_code/contractor_item_code).
-    Цену ставим из МойСклад salePrices[0].value (копейки).
+    Берём товары через /v1/supply-order/bundle по bundle_id.
+    Сопоставляем по артикулу продавца: offer_id/vendor_code/contractor_item_code.
+    Цену ставим из МойСклад salePrices[0].value.
     """
-    positions_payload: List[Dict[str, Any]] = []
+    positions: List[Dict[str, Any]] = []
     errors: List[str] = []
 
     supplies = order.get("supplies") or []
     if not isinstance(supplies, list):
         supplies = []
 
-    for supply in supplies:
-        if not isinstance(supply, dict):
+    for sup in supplies:
+        if not isinstance(sup, dict):
             continue
-        bundle_id = supply.get("bundle_id")
+        bundle_id = sup.get("bundle_id")
         if not bundle_id:
             continue
 
         items = client.get_bundle_items(bundle_id)
         print(f"[OZON FBO] Для bundle_id={bundle_id} ({client.account_name}) получено товаров: {len(items)}")
 
-        for item in items:
-            if not isinstance(item, dict):
+        for it in items:
+            if not isinstance(it, dict):
                 continue
 
             offer = (
-                item.get("offer_id")
-                or item.get("vendor_code")
-                or item.get("contractor_item_code")
+                it.get("offer_id")
+                or it.get("vendor_code")
+                or it.get("contractor_item_code")
             )
-
             if offer is None or str(offer).strip() == "":
-                # В крайнем случае — sku, но это хуже
-                sku = item.get("sku")
+                # fallback (хуже): sku
+                sku = it.get("sku")
                 if sku is not None:
                     offer = str(sku)
 
@@ -144,16 +201,15 @@ def _collect_positions(order: Dict[str, Any], client: OzonFboClient) -> Tuple[Li
                 continue
 
             offer = str(offer).strip()
-            qty = item.get("quantity") or 0
+            qty = it.get("quantity") or 0
             try:
                 qty = int(qty)
             except Exception:
                 qty = 0
-
             if qty <= 0:
                 continue
 
-            product = find_product_by_article(offer)
+            product = _ms_call_retry(find_product_by_article, offer)
             if not product:
                 errors.append(f"Товар с артикулом '{offer}' не найден в МойСклад")
                 continue
@@ -161,8 +217,8 @@ def _collect_positions(order: Dict[str, Any], client: OzonFboClient) -> Tuple[Li
             price = None
             sale_prices = product.get("salePrices")
             if isinstance(sale_prices, list) and sale_prices:
-                first_price = sale_prices[0] or {}
-                price = first_price.get("value")
+                first = sale_prices[0] or {}
+                price = first.get("value")
 
             pos = {
                 "quantity": qty,
@@ -171,38 +227,43 @@ def _collect_positions(order: Dict[str, Any], client: OzonFboClient) -> Tuple[Li
             if price is not None:
                 pos["price"] = price
 
-            positions_payload.append(pos)
+            positions.append(pos)
 
-    return positions_payload, errors
+    return positions, errors
 
 
 # ==========================
 # ОБРАБОТКА ОДНОЙ ПОСТАВКИ
 # ==========================
 
-def _process_single(order: Dict[str, Any], client: OzonFboClient, dry_run: bool) -> None:
+def _process_one(order: Dict[str, Any], client: OzonFboClient, cutoff: Optional[datetime], dry_run: bool) -> None:
     order_number = str(order.get("order_number") or order.get("order_id") or "")
     state = str(order.get("state") or "").upper()
+    created_dt = _parse_ozon_dt(order.get("created_date"))
 
-    if ONLY_ORDER_NUMBERS and order_number not in ONLY_ORDER_NUMBERS:
-        return
+    # pinned обрабатываем всегда
+    if order_number not in PINNED_ORDER_NUMBERS:
+        # остальные — только если created_date >= cutoff
+        if cutoff and created_dt and created_dt < cutoff:
+            return
 
+    # Только “подготовка к поставкам”
     if state not in PREP_STATES:
-        print(f"[FBO] Пропуск {order_number}: state={state} (не подготовка)")
         return
 
-    planned_dt = _get_planned_dt_from_order(order)
-    planned_moment = _to_ms_moment(planned_dt)
+    planned_dt = _get_planned_dt(order)
+    planned_ms = _to_ms_moment(planned_dt)
 
     supplies = order.get("supplies") or []
-    storage_name = "N/A"
+    storage_name = "—"
     if isinstance(supplies, list) and supplies and isinstance(supplies[0], dict):
-        storage_wh = (supplies[0].get("storage_warehouse") or {})
-        if isinstance(storage_wh, dict):
-            storage_name = storage_wh.get("name") or "N/A"
+        storage = supplies[0].get("storage_warehouse") or {}
+        if isinstance(storage, dict):
+            storage_name = storage.get("name") or "—"
 
     cluster = _cluster_from_storage_name(storage_name)
-    # Важно: убираем склад отгрузки (Красноярск и т.п.) полностью
+
+    # Комментарий: БЕЗ склада отгрузки (Красноярск и т.п. не используем вообще)
     comment = f"{order_number} - {cluster} - {storage_name}"
 
     positions_payload, pos_errors = _collect_positions(order, client)
@@ -214,7 +275,10 @@ def _process_single(order: Dict[str, Any], client: OzonFboClient, dry_run: bool)
     )
 
     if not positions_payload:
-        print(f"[FBO] {order_number}: нет позиций для МС. Ошибки: {pos_errors[:5]}")
+        if pos_errors:
+            print(f"[FBO] {order_number}: нет позиций МС. Примеры ошибок: {pos_errors[:5]}")
+        else:
+            print(f"[FBO] {order_number}: нет позиций МС (без деталей)")
         return
 
     payload: Dict[str, Any] = {
@@ -226,29 +290,28 @@ def _process_single(order: Dict[str, Any], client: OzonFboClient, dry_run: bool)
         "positions": positions_payload,
     }
 
-    if planned_moment:
-        payload["shipmentPlannedMoment"] = planned_moment
-        payload["deliveryPlannedMoment"] = planned_moment
+    # Планируемая дата отгрузки (и доставки — на всякий случай)
+    if planned_ms:
+        payload["shipmentPlannedMoment"] = planned_ms
+        payload["deliveryPlannedMoment"] = planned_ms
 
+    # Статус заказа FBO
     if MS_STATE_FBO_HREF:
         payload["state"] = {"meta": _ms_meta(MS_STATE_FBO_HREF, "state")}
 
     if dry_run:
         return
 
-    # чуть снижаем RPS к МС (чтобы не ловить 429)
+    # мягко ограничим RPS к МС
     time.sleep(0.25)
 
-    existing = find_customer_order_by_name(order_number)
-
+    existing = _ms_call_retry(find_customer_order_by_name, order_number)
     if existing:
         href = existing["meta"]["href"]
-        time.sleep(0.25)
-        update_customer_order(href, payload)
+        _ms_call_retry(update_customer_order, href, payload)
         print(f"[FBO] Заказ {order_number} обновлён в МС")
     else:
-        time.sleep(0.25)
-        create_customer_order(payload)
+        _ms_call_retry(create_customer_order, payload)
         print(f"[FBO] Заказ {order_number} создан в МС")
 
 
@@ -264,13 +327,11 @@ def sync_fbo_supplies(limit: int = 50, days_back: int = 30, dry_run: bool = Fals
 
     clients: List[OzonFboClient] = []
 
-    # ozon1 — твои реальные переменные окружения
     oz1_id = os.getenv("OZON_CLIENT_ID")
     oz1_key = os.getenv("OZON_API_KEY")
     if oz1_id and oz1_key:
         clients.append(OzonFboClient(oz1_id, oz1_key, account_name="ozon1"))
 
-    # ozon2 — твои реальные переменные окружения
     oz2_id = os.getenv("OZON2_CLIENT_ID")
     oz2_key = os.getenv("OZON2_API_KEY")
     if oz2_id and oz2_key:
@@ -279,6 +340,14 @@ def sync_fbo_supplies(limit: int = 50, days_back: int = 30, dry_run: bool = Fals
     if not clients:
         print("[FBO] Нет настроенных кабинетов Ozon для FBO (проверь .env)")
         return
+
+    cutoff = _load_cutoff()
+    if cutoff is None and not dry_run:
+        cutoff = datetime.now(timezone.utc)
+        _save_cutoff(cutoff)
+        print(f"[FBO] Установлена отсечка для новых поставок: {cutoff.isoformat()}")
+    else:
+        print(f"[FBO] Текущая отсечка: {cutoff.isoformat() if cutoff else 'нет (DRY_RUN?)'}")
 
     for client in clients:
         try:
@@ -291,7 +360,7 @@ def sync_fbo_supplies(limit: int = 50, days_back: int = 30, dry_run: bool = Fals
 
         for order in orders:
             try:
-                _process_single(order, client, dry_run=dry_run)
+                _process_one(order, client, cutoff=cutoff, dry_run=dry_run)
             except Exception as e:
                 num = str(order.get("order_number") or order.get("order_id") or "")
                 print(f"[FBO] Ошибка обработки заявки {num} ({client.account_name}): {e!r}")
