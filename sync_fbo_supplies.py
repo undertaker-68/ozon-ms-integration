@@ -1,5 +1,7 @@
 import os
 import json
+import time
+from requests.exceptions import HTTPError
 from datetime import datetime, timedelta, timezone
 
 import requests
@@ -540,14 +542,18 @@ def _process_single_fbo_order(order: dict, client: OzonFboClient, dry_run: bool)
     if dry_run:
         print(f"[FBO] DRY_RUN: заказ {order_name} не создаём/не обновляем.")
         return
-try:
-    existing = find_customer_order_by_name(order_name)
-except requests.exceptions.HTTPError as e:
-    if "429" in str(e):
-        print(f"[MS] Rate limit при поиске заказа {order_name}, пропускаем")
-        time.sleep(1.2)
-        return
-    raise
+            # небольшая пауза, чтобы не упереться в лимиты МС
+    time.sleep(0.25)
+
+    try:
+        existing = find_customer_order_by_name(order_name)
+    except HTTPError as e:
+        # если МС вернул 429 — не падаем, а пропускаем эту заявку и идём дальше
+        if getattr(e.response, "status_code", None) == 429:
+            print(f"[MS] 429 rate limit при поиске заказа {order_name}, пропускаем")
+            time.sleep(1.2)
+            return
+        raise
     
     if existing:
         order_href = existing["meta"]["href"]
@@ -568,7 +574,7 @@ except requests.exceptions.HTTPError as e:
             update_payload["state"] = {
                 "meta": _build_ms_meta(MS_STATE_FBO_HREF, "state"),
             }
-
+        time.sleep(0.25)
         update_customer_order(order_href, update_payload)
 
         changes: list[str] = []
@@ -599,6 +605,7 @@ except requests.exceptions.HTTPError as e:
         ms_order = existing
         ms_order_href = order_href
     else:
+        time.sleep(0.25)
         ms_order = create_customer_order(payload)
         ms_order_href = ms_order["meta"]["href"]
 
