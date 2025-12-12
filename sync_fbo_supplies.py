@@ -69,8 +69,13 @@ PREP_STATES = {"DATA_FILLING", "READY_TO_SUPPLY"}
 DEMAND_STATES = {"IN_TRANSIT", "ACCEPTANCE_AT_STORAGE_WAREHOUSE"}
 
 # Состояния, которые вообще берём из Ozon (чтобы не тянуть CANCELLED и т.п.)
-OZON_STATES_FILTER = sorted(PREP_STATES | DEMAND_STATES | {"REPORTS_CONFIRMATION_AWAITING"})
-
+OZON_STATES_FILTER = [
+    "CREATED",
+    "READY_TO_SUPPLY",
+    "IN_TRANSIT",
+    "ACCEPTANCE_AT_STORAGE_WAREHOUSE",
+    "REPORTS_CONFIRMATION_AWAITING",
+]
 
 # -----------------------------
 # ВСПОМОГАТЕЛЬНОЕ
