@@ -45,12 +45,16 @@ class OzonFboClient:
     # --------------------------
     # БАЗОВЫЙ POST
     # --------------------------
-    def get_supply_orders_by_ids(self, order_ids: list[int]) -> list[dict]:
-    if not order_ids:
-        return []
-    body = {"order_ids": order_ids}
-    data = self._post("/v3/supply-order/get", body)
-    return data.get("orders") or []
+        def get_supply_orders_by_ids(self, order_ids: list[int]) -> list[dict]:
+        if not order_ids:
+            return []
+
+        body = {
+            "order_ids": order_ids
+        }
+
+        data = self._post("/v3/supply-order/get", body)
+        return data.get("orders") or []
 
     def _post(self, path: str, body: dict) -> dict:
         """
