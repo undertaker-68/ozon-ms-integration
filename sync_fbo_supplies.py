@@ -415,12 +415,19 @@ def _ensure_move_and_demand(order_number: str, comment: str, ms_order: dict, ozo
 def _process_one(order: Dict[str, Any], client: OzonFboClient, cutoff: Optional[datetime], sync_state: dict) -> None:
     order_number = str(order.get("order_number") or order.get("order_id") or "")
     oz_state = str(order.get("state") or "").upper()
+
     created_dt = _parse_ozon_dt(order.get("created_date"))
+    updated_dt = _parse_ozon_dt(order.get("state_updated_date"))
+
+    # Для отсечки используем более "живую" дату:
+    # - если есть state_updated_date → берём её (она отражает реальные изменения)
+    # - иначе fallback на created_date
+    ref_dt = updated_dt or created_dt
 
     # pinned — всегда
     if order_number not in PINNED_ORDER_NUMBERS:
-        # остальные — только если created >= cutoff
-        if cutoff and created_dt and created_dt < cutoff:
+        # остальные — только если ref_dt >= cutoff
+        if cutoff and ref_dt and ref_dt < cutoff:
             return
 
     # Берём склад назначения + кластер
