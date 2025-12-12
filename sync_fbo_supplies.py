@@ -540,9 +540,15 @@ def _process_single_fbo_order(order: dict, client: OzonFboClient, dry_run: bool)
     if dry_run:
         print(f"[FBO] DRY_RUN: заказ {order_name} не создаём/не обновляем.")
         return
-
+try:
     existing = find_customer_order_by_name(order_name)
-
+except requests.exceptions.HTTPError as e:
+    if "429" in str(e):
+        print(f"[MS] Rate limit при поиске заказа {order_name}, пропускаем")
+        time.sleep(1.2)
+        return
+    raise
+    
     if existing:
         order_href = existing["meta"]["href"]
 
