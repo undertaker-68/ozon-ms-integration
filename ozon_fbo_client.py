@@ -45,7 +45,7 @@ class OzonFboClient:
     # --------------------------
     # БАЗОВЫЙ POST
     # --------------------------
-            def get_supply_orders_by_ids(self, order_ids: list[int]) -> list[dict]:
+    def get_supply_orders_by_ids(self, order_ids: list[int]) -> list[dict]:
         if not order_ids:
             return []
 
