@@ -1,11 +1,13 @@
 import os
 import json
 import time
+import hashlib
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+import base64
+import requests
 from dotenv import load_dotenv
-from requests.exceptions import HTTPError
 
 from ozon_fbo_client import OzonFboClient
 from ms_client import (
@@ -15,6 +17,8 @@ from ms_client import (
     update_customer_order,
 )
 
+from notifier import send_telegram_message
+
 load_dotenv()
 
 # ==========================
@@ -23,28 +27,59 @@ load_dotenv()
 
 DRY_RUN_FBO = os.getenv("DRY_RUN_FBO", "false").lower() == "true"
 
-# Две текущие поставки должны обновляться всегда (как ты хотел)
+# Две текущие поставки обновляем всегда
 PINNED_ORDER_NUMBERS = {"2000037545485", "2000037485754"}
 
 # Cutoff-файл: всё, что создано раньше cutoff, не трогаем (кроме pinned)
 FBO_CUTOFF_FILE = os.getenv("FBO_CUTOFF_FILE", "fbo_cutoff.json")
 
+# Файл состояния для telegram/diff
+FBO_SYNC_STATE_FILE = os.getenv("FBO_SYNC_STATE_FILE", "fbo_sync_state.json")
+
 # Только “Подготовка к поставкам”
 PREP_STATES = {"DATA_FILLING", "READY_TO_SUPPLY"}
 
-# МойСклад
+# Триггеры для создания перемещения+отгрузки
+SHIP_STATES = {"IN_TRANSIT", "ACCEPTANCE_AT_STORAGE_WAREHOUSE"}
+
+# ==========================
+# МОЙСКЛАД: ДАННЫЕ И ДИРЕКТ-HTTP (для move/demand)
+# ==========================
+
+MS_LOGIN = os.getenv("MS_LOGIN")
+MS_PASSWORD = os.getenv("MS_PASSWORD")
+MS_BASE_URL = "https://api.moysklad.ru/api/remap/1.2"
+
 MS_ORGANIZATION_HREF = os.getenv("MS_ORGANIZATION_HREF")
 MS_AGENT_HREF = os.getenv("MS_AGENT_HREF")
-MS_FBO_STORE_HREF = os.getenv("MS_FBO_STORE_HREF") or os.getenv("MS_STORE_HREF")
+
+# Склад-источник (обычный склад) — нужен для перемещения
+MS_STORE_HREF = os.getenv("MS_STORE_HREF")
+# Склад FBO (назначение перемещения, и склад заказа)
+MS_FBO_STORE_HREF = os.getenv("MS_FBO_STORE_HREF") or MS_STORE_HREF
 
 # Статус заказа покупателя “FBO”
 MS_STATE_FBO_HREF = os.getenv("MS_STATE_FBO_HREF") or os.getenv("MS_STATE_FBO")
 
-if not MS_ORGANIZATION_HREF or not MS_AGENT_HREF or not MS_FBO_STORE_HREF:
+# Опционально: статусы “Поставка” для перемещения/отгрузки
+MS_STATE_SUPPLY_MOVE = os.getenv("MS_STATE_SUPPLY_MOVE")   # meta.href state для entity/move
+MS_STATE_SUPPLY_DEMAND = os.getenv("MS_STATE_SUPPLY_DEMAND")  # meta.href state для entity/demand
+
+if not MS_LOGIN or not MS_PASSWORD:
+    raise RuntimeError("Не заданы MS_LOGIN / MS_PASSWORD в .env")
+
+if not MS_ORGANIZATION_HREF or not MS_AGENT_HREF or not MS_FBO_STORE_HREF or not MS_STORE_HREF:
     raise RuntimeError(
-        "Не заданы MS_ORGANIZATION_HREF / MS_AGENT_HREF / MS_FBO_STORE_HREF "
-        "(или MS_STORE_HREF). Проверь .env"
+        "Не заданы MS_ORGANIZATION_HREF / MS_AGENT_HREF / MS_STORE_HREF / MS_FBO_STORE_HREF. Проверь .env"
     )
+
+_MS_AUTH = base64.b64encode(f"{MS_LOGIN}:{MS_PASSWORD}".encode("utf-8")).decode("utf-8")
+_MS_HEADERS = {
+    "Authorization": f"Basic {_MS_AUTH}",
+    "Accept": "application/json;charset=utf-8",
+    "Accept-Encoding": "gzip",
+    "Content-Type": "application/json",
+}
 
 # ==========================
 # ВСПОМОГАТЕЛЬНЫЕ
@@ -65,9 +100,6 @@ def _parse_ozon_dt(s: Optional[str]) -> Optional[datetime]:
 
 
 def _to_ms_moment(dt: Optional[datetime]) -> Optional[str]:
-    """
-    МойСклад принимает plannedMoment в формате 'YYYY-MM-DD HH:MM:SS'
-    """
     if not dt:
         return None
     dt = dt.astimezone(timezone.utc)
@@ -82,7 +114,6 @@ def _cluster_from_storage_name(storage_name: str) -> str:
     up = (storage_name or "").upper()
     if "ПУШКИНО" in up:
         return "Москва и МО"
-    # если склад в формате ГОРОД_..., берём “ГОРОД”
     if "_" in (storage_name or ""):
         return storage_name.split("_", 1)[0]
     return storage_name or "—"
@@ -94,8 +125,7 @@ def _load_cutoff() -> Optional[datetime]:
     try:
         with open(FBO_CUTOFF_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-        s = data.get("cutoff")
-        return _parse_ozon_dt(s)
+        return _parse_ozon_dt(data.get("cutoff"))
     except Exception:
         return None
 
@@ -107,46 +137,101 @@ def _save_cutoff(dt: datetime) -> None:
         json.dump({"cutoff": s}, f, ensure_ascii=False, indent=2)
 
 
-def _ms_call_retry(fn, *args, **kwargs):
-    """
-    Ретрай на 429 от МойСклад, чтобы скрипт не умирал на лимитах.
-    """
-    max_tries = 5
-    backoff = 0.8
+def _load_sync_state() -> Dict[str, Any]:
+    if not os.path.exists(FBO_SYNC_STATE_FILE):
+        return {"orders": {}}
+    try:
+        with open(FBO_SYNC_STATE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f) or {"orders": {}}
+    except Exception:
+        return {"orders": {}}
+
+
+def _save_sync_state(state: Dict[str, Any]) -> None:
+    with open(FBO_SYNC_STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False, indent=2)
+
+
+def _hash_positions(positions: List[Dict[str, Any]]) -> str:
+    # стабильный хэш по (assortment.href, qty)
+    items = []
+    for p in positions:
+        assort = p.get("assortment") or {}
+        meta = assort.get("meta") or {}
+        href = meta.get("href") or ""
+        qty = int(p.get("quantity") or 0)
+        items.append((href, qty))
+    items.sort()
+    raw = json.dumps(items, ensure_ascii=False).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _ms_get(url: str, params: Optional[dict] = None) -> dict:
+    r = requests.get(url, headers=_MS_HEADERS, params=params, timeout=30)
+    if r.status_code >= 400:
+        print(f"[MS GET ERROR] {r.url} status={r.status_code} body={r.text[:500]}")
+    r.raise_for_status()
+    return r.json()
+
+
+def _ms_post(url: str, payload: dict) -> dict:
+    r = requests.post(url, headers=_MS_HEADERS, json=payload, timeout=30)
+    if r.status_code >= 400:
+        print(f"[MS POST ERROR] {r.url} status={r.status_code} body={r.text[:500]}")
+    r.raise_for_status()
+    return r.json()
+
+
+def _ms_put(url: str, payload: dict) -> dict:
+    r = requests.put(url, headers=_MS_HEADERS, json=payload, timeout=30)
+    if r.status_code >= 400:
+        print(f"[MS PUT ERROR] {r.url} status={r.status_code} body={r.text[:500]}")
+    r.raise_for_status()
+    return r.json()
+
+
+def _ms_retry(fn, *args, **kwargs):
+    # ретраи на 429 от МС
+    max_tries = 6
     for attempt in range(1, max_tries + 1):
         try:
             return fn(*args, **kwargs)
-        except HTTPError as e:
+        except requests.HTTPError as e:
             code = getattr(e.response, "status_code", None)
             if code == 429:
-                wait = backoff * attempt
+                wait = 0.8 * attempt
                 print(f"[MS] 429 rate limit, попытка {attempt}/{max_tries}, ждём {wait:.1f}s")
-                time.sleep(wait)
-                continue
-            raise
-        except Exception:
-            # Если ms_client не пробрасывает HTTPError как надо,
-            # но в тексте встречается 429 — тоже перетерпим.
-            msg = repr(_) if False else ""  # no-op to appease linters
-            text = ""
-            try:
-                text = str(e)
-            except Exception:
-                text = repr(e)
-            if " 429 " in text or "status=429" in text or "Превышено ограничение" in text:
-                wait = backoff * attempt
-                print(f"[MS] Похоже на 429, попытка {attempt}/{max_tries}, ждём {wait:.1f}s")
                 time.sleep(wait)
                 continue
             raise
     raise RuntimeError("[MS] Не удалось выполнить запрос из-за постоянных 429")
 
 
+def _ms_find_by_name(entity: str, name: str) -> Optional[dict]:
+    url = f"{MS_BASE_URL}/entity/{entity}"
+    params = {"filter": f"name={name}", "limit": 1}
+    data = _ms_retry(_ms_get, url, params)
+    rows = data.get("rows") or []
+    return rows[0] if rows else None
+
+
+def _ms_get_order_full(order_href: str) -> dict:
+    return _ms_retry(_ms_get, order_href)
+
+
+def _ms_get_order_positions(order_href: str) -> List[dict]:
+    # позиции заказа лежат в /customerorder/<id>/positions
+    url = f"{order_href}/positions"
+    data = _ms_retry(_ms_get, url)
+    rows = data.get("rows") or []
+    return rows if isinstance(rows, list) else []
+
+
+# ==========================
+# ОЗОН → ПЛАНОВАЯ ДАТА + СКЛАД НАЗНАЧЕНИЯ
+# ==========================
+
 def _get_planned_dt(order: Dict[str, Any]) -> Optional[datetime]:
-    """
-    Планируемая дата = arrival_date склада назначения, если есть.
-    Иначе — created_date.
-    """
     supplies = order.get("supplies") or []
     if isinstance(supplies, list) and supplies:
         s0 = supplies[0] if isinstance(supplies[0], dict) else {}
@@ -159,12 +244,20 @@ def _get_planned_dt(order: Dict[str, Any]) -> Optional[datetime]:
     return _parse_ozon_dt(order.get("created_date"))
 
 
+def _get_storage_name(order: Dict[str, Any]) -> str:
+    supplies = order.get("supplies") or []
+    if isinstance(supplies, list) and supplies and isinstance(supplies[0], dict):
+        storage = supplies[0].get("storage_warehouse") or {}
+        if isinstance(storage, dict):
+            return storage.get("name") or "—"
+    return "—"
+
+
+# ==========================
+# СБОР ПОЗИЦИЙ ПО BUNDLE
+# ==========================
+
 def _collect_positions(order: Dict[str, Any], client: OzonFboClient) -> Tuple[List[Dict[str, Any]], List[str]]:
-    """
-    Берём товары через /v1/supply-order/bundle по bundle_id.
-    Сопоставляем по артикулу продавца: offer_id/vendor_code/contractor_item_code.
-    Цену ставим из МойСклад salePrices[0].value.
-    """
     positions: List[Dict[str, Any]] = []
     errors: List[str] = []
 
@@ -186,13 +279,10 @@ def _collect_positions(order: Dict[str, Any], client: OzonFboClient) -> Tuple[Li
             if not isinstance(it, dict):
                 continue
 
-            offer = (
-                it.get("offer_id")
-                or it.get("vendor_code")
-                or it.get("contractor_item_code")
-            )
-            if offer is None or str(offer).strip() == "":
-                # fallback (хуже): sku
+            # ВАЖНО: берём артикул продавца, не SKU
+            offer = it.get("offer_id") or it.get("vendor_code") or it.get("contractor_item_code")
+            if not offer:
+                # fallback: sku (если вдруг API не отдаст offer_id)
                 sku = it.get("sku")
                 if sku is not None:
                     offer = str(sku)
@@ -201,6 +291,7 @@ def _collect_positions(order: Dict[str, Any], client: OzonFboClient) -> Tuple[Li
                 continue
 
             offer = str(offer).strip()
+
             qty = it.get("quantity") or 0
             try:
                 qty = int(qty)
@@ -209,11 +300,12 @@ def _collect_positions(order: Dict[str, Any], client: OzonFboClient) -> Tuple[Li
             if qty <= 0:
                 continue
 
-            product = _ms_call_retry(find_product_by_article, offer)
+            product = _ms_retry(find_product_by_article, offer)
             if not product:
                 errors.append(f"Товар с артикулом '{offer}' не найден в МойСклад")
                 continue
 
+            # цена из МС (salePrices[0].value)
             price = None
             sale_prices = product.get("salePrices")
             if isinstance(sale_prices, list) and sale_prices:
@@ -233,54 +325,129 @@ def _collect_positions(order: Dict[str, Any], client: OzonFboClient) -> Tuple[Li
 
 
 # ==========================
-# ОБРАБОТКА ОДНОЙ ПОСТАВКИ
+# MOVE + DEMAND (1 на заявку)
 # ==========================
 
-def _process_one(order: Dict[str, Any], client: OzonFboClient, cutoff: Optional[datetime], dry_run: bool) -> None:
+def _ensure_move_and_demand(order_number: str, comment: str, ms_order: dict, ozon_state: str) -> None:
+    """
+    Создаёт перемещение (move) + отгрузку (demand), если их ещё нет.
+    Проверяем существование по name == order_number.
+    """
+    # 1) Если уже есть demand — считаем, что всё сделано (1 отгрузка на 1 заявку)
+    existing_demand = _ms_find_by_name("demand", order_number)
+    if existing_demand:
+        return
+
+    # 2) Создаём/проверяем move
+    existing_move = _ms_find_by_name("move", order_number)
+
+    # Нужно достать позиции заказа
+    order_href = (ms_order.get("meta") or {}).get("href")
+    if not order_href:
+        raise ValueError("У заказа нет meta.href, не могу создать перемещение/отгрузку")
+
+    full_order = _ms_get_order_full(order_href)
+    positions = _ms_get_order_positions(order_href)
+    if not positions:
+        # иногда позиции могут быть в самом заказе (редко)
+        positions = full_order.get("positions", {}).get("rows") or []
+    if not positions:
+        raise ValueError("В заказе нет позиций для перемещения/отгрузки")
+
+    move_payload = {
+        "name": order_number,
+        "organization": full_order.get("organization"),
+        "sourceStore": {"meta": _ms_meta(MS_STORE_HREF, "store")},
+        "targetStore": {"meta": _ms_meta(MS_FBO_STORE_HREF, "store")},
+        "description": comment,
+        "positions": [
+            {
+                "quantity": p.get("quantity", 0),
+                "assortment": p.get("assortment"),
+            }
+            for p in positions
+        ],
+    }
+    if MS_STATE_SUPPLY_MOVE:
+        move_payload["state"] = {"meta": _ms_meta(MS_STATE_SUPPLY_MOVE, "state")}
+
+    if not existing_move:
+        print(f"[FBO] Создаём перемещение {order_number} (СКЛАД → FBO)")
+        if not DRY_RUN_FBO:
+            _ms_retry(_ms_post, f"{MS_BASE_URL}/entity/move", move_payload)
+            send_telegram_message(f"✅ Создано перемещение по поставке №{order_number} (статус Ozon: {ozon_state})")
+    else:
+        # обновлять move не обязательно, но можем подравнять комментарий/позиции
+        pass
+
+    # 3) Создаём demand (отгрузку)
+    demand_payload = {
+        "name": order_number,
+        "customerOrder": {"meta": full_order.get("meta")},
+        "organization": full_order.get("organization"),
+        "agent": full_order.get("agent"),
+        # склад отгрузки логичнее = FBO (после перемещения)
+        "store": {"meta": _ms_meta(MS_FBO_STORE_HREF, "store")},
+        "description": comment,
+        "positions": [
+            {
+                "quantity": p.get("quantity", 0),
+                "assortment": p.get("assortment"),
+                # цена берём из позиции заказа (если есть)
+                "price": p.get("price", 0),
+            }
+            for p in positions
+        ],
+    }
+    if MS_STATE_SUPPLY_DEMAND:
+        demand_payload["state"] = {"meta": _ms_meta(MS_STATE_SUPPLY_DEMAND, "state")}
+
+    print(f"[FBO] Создаём отгрузку {order_number} (1 на заявку)")
+    if not DRY_RUN_FBO:
+        _ms_retry(_ms_post, f"{MS_BASE_URL}/entity/demand", demand_payload)
+        send_telegram_message(f"🚚 Создана отгрузка по поставке №{order_number} (статус Ozon: {ozon_state})")
+
+
+# ==========================
+# ОСНОВНАЯ ОБРАБОТКА 1 ПОСТАВКИ
+# ==========================
+
+def _process_one(order: Dict[str, Any], client: OzonFboClient, cutoff: Optional[datetime], sync_state: dict) -> None:
     order_number = str(order.get("order_number") or order.get("order_id") or "")
-    state = str(order.get("state") or "").upper()
+    oz_state = str(order.get("state") or "").upper()
     created_dt = _parse_ozon_dt(order.get("created_date"))
 
-    # pinned обрабатываем всегда
+    # pinned — всегда
     if order_number not in PINNED_ORDER_NUMBERS:
-        # остальные — только если created_date >= cutoff
+        # остальные — только если created >= cutoff
         if cutoff and created_dt and created_dt < cutoff:
             return
 
-    # Только “подготовка к поставкам”
-    if state not in PREP_STATES:
-        return
+    # Берём склад назначения + кластер
+    storage_name = _get_storage_name(order)
+    cluster = _cluster_from_storage_name(storage_name)
+
+    # Комментарий: НИКАКОГО “Красноярск” — только номер/кластер/склад назначения
+    comment = f"{order_number} - {cluster} - {storage_name}"
 
     planned_dt = _get_planned_dt(order)
     planned_ms = _to_ms_moment(planned_dt)
 
-    supplies = order.get("supplies") or []
-    storage_name = "—"
-    if isinstance(supplies, list) and supplies and isinstance(supplies[0], dict):
-        storage = supplies[0].get("storage_warehouse") or {}
-        if isinstance(storage, dict):
-            storage_name = storage.get("name") or "—"
-
-    cluster = _cluster_from_storage_name(storage_name)
-
-    # Комментарий: БЕЗ склада отгрузки (Красноярск и т.п. не используем вообще)
-    comment = f"{order_number} - {cluster} - {storage_name}"
-
+    # Позиции
     positions_payload, pos_errors = _collect_positions(order, client)
 
     print(
         f"[FBO] Обработка заявки {order_number} "
-        f"(аккаунт={client.account_name}, state={state}), "
-        f"позиций={len(positions_payload)}, DRY_RUN={dry_run}"
+        f"(аккаунт={client.account_name}, state={oz_state}), "
+        f"позиций={len(positions_payload)}, DRY_RUN={DRY_RUN_FBO}"
     )
 
     if not positions_payload:
         if pos_errors:
-            print(f"[FBO] {order_number}: нет позиций МС. Примеры ошибок: {pos_errors[:5]}")
-        else:
-            print(f"[FBO] {order_number}: нет позиций МС (без деталей)")
+            print(f"[FBO] {order_number}: нет позиций МС. Примеры: {pos_errors[:5]}")
         return
 
+    # payload заказа в МС
     payload: Dict[str, Any] = {
         "name": order_number,
         "organization": {"meta": _ms_meta(MS_ORGANIZATION_HREF, "organization")},
@@ -290,39 +457,79 @@ def _process_one(order: Dict[str, Any], client: OzonFboClient, cutoff: Optional[
         "positions": positions_payload,
     }
 
-    # Планируемая дата отгрузки (и доставки — на всякий случай)
     if planned_ms:
         payload["shipmentPlannedMoment"] = planned_ms
         payload["deliveryPlannedMoment"] = planned_ms
 
-    # Статус заказа FBO
     if MS_STATE_FBO_HREF:
         payload["state"] = {"meta": _ms_meta(MS_STATE_FBO_HREF, "state")}
 
-    if dry_run:
-        return
+    # ===== create/update заказа в МС =====
+    existing = None
+    if not DRY_RUN_FBO:
+        existing = _ms_retry(find_customer_order_by_name, order_number)
 
-    # мягко ограничим RPS к МС
-    time.sleep(0.25)
-
-    existing = _ms_call_retry(find_customer_order_by_name, order_number)
+    created_or_updated = "none"
     if existing:
-        href = existing["meta"]["href"]
-        _ms_call_retry(update_customer_order, href, payload)
-        print(f"[FBO] Заказ {order_number} обновлён в МС")
+        if not DRY_RUN_FBO:
+            href = existing["meta"]["href"]
+            _ms_retry(update_customer_order, href, payload)
+        created_or_updated = "updated"
     else:
-        _ms_call_retry(create_customer_order, payload)
-        print(f"[FBO] Заказ {order_number} создан в МС")
+        if not DRY_RUN_FBO:
+            _ms_retry(create_customer_order, payload)
+        created_or_updated = "created"
+
+    # ===== Telegram уведомления: создана/изменена =====
+    orders_state = sync_state.setdefault("orders", {})
+    prev = orders_state.get(order_number, {})
+
+    pos_hash = _hash_positions(positions_payload)
+    changed_fields = []
+
+    if prev.get("planned_ms") != planned_ms:
+        changed_fields.append(f"дата={planned_ms or '—'}")
+    if prev.get("pos_hash") != pos_hash:
+        changed_fields.append("состав=изменён")
+
+    # Сообщение про создание
+    if created_or_updated == "created" and not DRY_RUN_FBO:
+        send_telegram_message(f"🆕 Создана поставка №{order_number} на склад {storage_name}")
+    # Сообщение про изменение (только если реально менялось)
+    elif created_or_updated == "updated" and changed_fields and not DRY_RUN_FBO:
+        send_telegram_message(
+            f"✏️ Изменена поставка №{order_number} на склад {storage_name}: " + ", ".join(changed_fields)
+        )
+
+    # сохраняем snapshot
+    orders_state[order_number] = {
+        "planned_ms": planned_ms,
+        "pos_hash": pos_hash,
+        "oz_state": oz_state,
+        "storage_name": storage_name,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    # ===== move + demand при переходе в нужные статусы =====
+    if oz_state in SHIP_STATES:
+        # достаём заказ из МС заново (чтобы иметь meta.href)
+        ms_order = existing
+        if not ms_order and not DRY_RUN_FBO:
+            ms_order = _ms_retry(find_customer_order_by_name, order_number)
+
+        if ms_order:
+            # создаём только 1 раз (проверка по name внутри)
+            _ensure_move_and_demand(order_number, comment, ms_order, oz_state)
 
 
 # ==========================
 # ОСНОВНОЙ ЗАПУСК
 # ==========================
 
-def sync_fbo_supplies(limit: int = 50, days_back: int = 30, dry_run: bool = False) -> None:
+def sync_fbo_supplies(limit: int = 50, days_back: int = 30) -> None:
     print(
         f"Запуск синхронизации FBO-поставок "
-        f"(limit={limit}, days_back={days_back}, DRY_RUN={dry_run})"
+        f"(limit={limit}, days_back={days_back}, DRY_RUN={DRY_RUN_FBO})"
     )
 
     clients: List[OzonFboClient] = []
@@ -342,12 +549,14 @@ def sync_fbo_supplies(limit: int = 50, days_back: int = 30, dry_run: bool = Fals
         return
 
     cutoff = _load_cutoff()
-    if cutoff is None and not dry_run:
+    if cutoff is None and not DRY_RUN_FBO:
         cutoff = datetime.now(timezone.utc)
         _save_cutoff(cutoff)
         print(f"[FBO] Установлена отсечка для новых поставок: {cutoff.isoformat()}")
     else:
-        print(f"[FBO] Текущая отсечка: {cutoff.isoformat() if cutoff else 'нет (DRY_RUN?)'}")
+        print(f"[FBO] Текущая отсечка: {cutoff.isoformat() if cutoff else 'нет'}")
+
+    sync_state = _load_sync_state()
 
     for client in clients:
         try:
@@ -360,12 +569,15 @@ def sync_fbo_supplies(limit: int = 50, days_back: int = 30, dry_run: bool = Fals
 
         for order in orders:
             try:
-                _process_one(order, client, cutoff=cutoff, dry_run=dry_run)
+                _process_one(order, client, cutoff=cutoff, sync_state=sync_state)
             except Exception as e:
                 num = str(order.get("order_number") or order.get("order_id") or "")
                 print(f"[FBO] Ошибка обработки заявки {num} ({client.account_name}): {e!r}")
                 continue
 
+    if not DRY_RUN_FBO:
+        _save_sync_state(sync_state)
+
 
 if __name__ == "__main__":
-    sync_fbo_supplies(limit=50, days_back=30, dry_run=DRY_RUN_FBO)
+    sync_fbo_supplies(limit=50, days_back=30)
