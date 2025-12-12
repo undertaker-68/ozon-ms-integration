@@ -43,7 +43,7 @@ MS_FBO_STORE_HREF = os.getenv("MS_FBO_STORE_HREF") or MS_STORE_HREF
 MS_FBO_AGENT_HREF = os.getenv("MS_FBO_AGENT_HREF") or MS_AGENT_HREF
 
 # Статус заказа для FBO (опционально)
-MS_STATE_FBO_HREF = os.getenv("MS_STATE_FBO_HREF")
+MS_STATE_FBO_HREF = os.getenv("MS_STATE_FBO_HREF") or os.getenv("MS_STATE_FBO")
 
 # Статус отгрузки для FBO (опционально)
 MS_FBO_DEMAND_STATE_HREF = os.getenv("MS_FBO_DEMAND_STATE_HREF")
@@ -60,7 +60,7 @@ DEMAND_CREATE_SUPPLY_STATES = {
     "ACCEPTANCE_AT_STORAGE_WAREHOUSE",
 }
 
-# Файл состояния для FBO (чтобы не трогать старые поставки)
+# Файл состояния для FBO (чтобы не трогать старые поставки на самом первом запуске)
 FBO_STATE_FILE = "fbo_state.json"
 
 
@@ -286,6 +286,7 @@ def _create_move_from_order(order: dict) -> dict:
     org_meta = order.get("organization", {}).get("meta") or _build_ms_meta(
         MS_ORGANIZATION_HREF, "organization"
     )
+
     source_store_meta = order.get("store", {}).get("meta") or _build_ms_meta(
         MS_STORE_HREF, "store"
     )
@@ -459,7 +460,8 @@ def _process_single_fbo_order(order: dict, client: OzonFboClient, dry_run: bool)
     storage_wh = (first_supply.get("storage_warehouse") or {}) if first_supply else {}
     storage_name = storage_wh.get("name") or "N/A"
 
-    # Попробуем кластер взять из drop_off_warehouse.name (если нужно — потом подправим)
+    # Попробуем кластер взять из drop_off_warehouse.name — больше не используем,
+    # комментарий формируем только как <номер заявки> - <склад назначения>.
     dropoff_wh = order.get("drop_off_warehouse") or {}
     cluster_name = ""
 
@@ -472,10 +474,8 @@ def _process_single_fbo_order(order: dict, client: OzonFboClient, dry_run: bool)
     arrival_dt = _parse_ozon_datetime(arrival_raw) if isinstance(arrival_raw, str) else None
     planned_moment = _to_ms_moment(arrival_dt)
 
-    # Комментарий: номер заявки - кластер - склад назначения
+    # Комментарий: номер заявки - склад назначения
     comment_parts = [order_number]
-    if cluster_name:
-        comment_parts.append(cluster_name)
     if storage_name:
         comment_parts.append(storage_name)
     comment = " - ".join(comment_parts)
@@ -655,7 +655,8 @@ def sync_fbo_supplies(limit: int = 50, days_back: int = 30, dry_run: bool | None
     ВАЖНО:
       - первый запуск (когда нет fbo_state.json) просто
         запоминает все текущие заявки и НИЧЕГО не создаёт в МС;
-      - последующие запуски обрабатывают только новые order_id.
+      - последующие запуски обрабатывают все заявки в окне days_back,
+        чтобы актуальные поставки обновлялись по дате и составу.
     """
     if dry_run is None:
         dry_run = DRY_RUN_FBO
@@ -716,19 +717,14 @@ def sync_fbo_supplies(limit: int = 50, days_back: int = 30, dry_run: bool | None
             )
             continue
 
-        # Обычный режим: обрабатываем только новые заявки
+        # Обычный режим: всегда обрабатываем заявки (в пределах days_back),
+        # чтобы актуальные поставки продолжали обновляться по дате и составу.
         for order in orders:
             oid = order.get("_order_id") or order.get("order_id")
             if not isinstance(oid, int):
                 continue
 
-            if oid in known_ids:
-                continue
-
             _process_single_fbo_order(order, client, dry_run=dry_run)
-
-            if not dry_run:
-                known_ids.append(oid)
 
     if not dry_run:
         _save_fbo_state(state)
