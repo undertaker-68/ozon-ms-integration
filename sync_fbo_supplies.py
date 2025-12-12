@@ -22,7 +22,8 @@ load_dotenv()
 DRY_RUN_FBO = os.getenv("DRY_RUN_FBO", "false").lower() == "true"
 
 # ВРЕМЕННО: обновляем только эти 2 поставки, чтобы не трогать старые
-ONLY_ORDER_NUMBERS = {"2000037545485", "2000037485754"}
+PINNED_ORDER_NUMBERS = {"2000037545485", "2000037485754"}
+FBO_CUTOFF_FILE = "fbo_cutoff.json"
 
 # "Подготовка к поставкам" (по твоему выводу debug_fbo_list.py)
 PREP_STATES = {"DATA_FILLING", "READY_TO_SUPPLY"}
