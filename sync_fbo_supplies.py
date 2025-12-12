@@ -538,7 +538,7 @@ def sync_fbo_supplies(limit: int = 50, days_back: int = 30) -> None:
             continue
 
         print(f"[OZON FBO] Получение деталей заявок (get) ({acc}), ids={ids}")
-        orders = client.get_supply_orders(ids)
+        orders = client.get_supply_orders_by_ids(ids)
         print(f"[OZON FBO] Всего заявок с деталями ({acc}): {len(orders)}")
         print(f"[FBO] Кабинет {acc}: получено заявок: {len(orders)}")
 
